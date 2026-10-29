@@ -1226,6 +1226,26 @@ mod tests {
     }
 
     #[test]
+    fn programs_set_and_reset_the_cursor_color() {
+        let mut vt = Vt::new(20, 3);
+        let default = theme().cursor;
+        assert_eq!(vt.frame().cursor.unwrap().color, default);
+        // Helix and Neovim set it with OSC 12, ended by BEL or ST.
+        vt.write(b"\x1b]12;#ff8800\x07");
+        assert!(vt.shows_change(), "a new cursor color needs a frame");
+        assert_eq!(vt.frame().cursor.unwrap().color, Rgb(0xff, 0x88, 0x00));
+        vt.write(b"\x1b]12;rgb:00/80/ff\x1b\\");
+        assert_eq!(vt.frame().cursor.unwrap().color, Rgb(0x00, 0x80, 0xff));
+        // A theme change keeps the program's color.
+        let mut other = theme();
+        other.cursor = Rgb(1, 2, 3);
+        vt.set_theme(other);
+        assert_eq!(vt.frame().cursor.unwrap().color, Rgb(0x00, 0x80, 0xff));
+        vt.write(b"\x1b]112\x07");
+        assert_eq!(vt.frame().cursor.unwrap().color, Rgb(1, 2, 3), "OSC 112: back to the theme's");
+    }
+
+    #[test]
     fn title_is_reported_once() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"\x1b]2;hello\x07");
