@@ -133,6 +133,16 @@ impl Tab {
         self.focused.clone().filter(|p| self.root.find(p).is_some()).or_else(|| self.root.panes().first().map(|n| n.id.clone()))
     }
 
+    /// The pane to go back to: the one focused before that's still here,
+    /// else (no history yet) another pane of the tab.
+    pub fn last_pane(&self) -> Option<String> {
+        let focused = self.focused_pane();
+        let other = |p: &&String| Some(p.as_str()) != focused.as_deref() && self.root.find(p).is_some();
+        self.before.iter().rev().find(other).cloned().or_else(|| {
+            self.root.panes().into_iter().map(|n| &n.id).find(other).cloned()
+        })
+    }
+
     /// What's drawn: only the zoomed pane when one is zoomed.
     pub fn shown(&self) -> &Node {
         self.zoomed.as_deref().and_then(|z| self.root.find(z)).unwrap_or(&self.root)
@@ -723,6 +733,39 @@ mod tests {
         assert_eq!(m.previous_space(), None);
         m.remove_space("p2");
         assert_eq!(m.previous_space(), None, "closing the shown one shows a neighbor, not one that's gone");
+    }
+
+    #[test]
+    fn the_last_pane_is_the_tabs_own_and_falls_back_to_another_pane() {
+        let mut m = model_with_one();
+        let last = |m: &Model| m.active_tab().and_then(Tab::last_pane);
+        assert_eq!(last(&m), None, "a tab of one pane has nowhere to go");
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x2", Axis::Row, "x3", "t3");
+        m.focus_pane("x1");
+        m.focus_pane("x3");
+        assert_eq!(last(&m).as_deref(), Some("x1"));
+        m.focus_pane("x1");
+        assert_eq!(last(&m).as_deref(), Some("x3"), "toggles");
+        // Another tab keeps its own history; coming back leaves this one's as it was.
+        m.add_tab("p1", Tab::new("c2", "docs", "y1", "u1"));
+        m.split("y1", Axis::Row, "y2", "u2");
+        m.focus_pane("y1");
+        assert_eq!(last(&m).as_deref(), Some("y2"));
+        m.focus_pane("x1");
+        assert_eq!(last(&m).as_deref(), Some("x3"));
+        // The one before is gone: the next one back that's still there.
+        m.focus_pane("x2");
+        m.focus_pane("x3");
+        m.remove_pane("x2");
+        assert_eq!(last(&m).as_deref(), Some("x1"));
+        // No history (a fresh tab, as one restored without it): another pane.
+        let mut fresh = Tab::new("c9", "", "z1", "w1");
+        fresh.root = Node::container("c9", Axis::Row, vec![pane("z1", "w1"), pane("z2", "w2")]);
+        assert_eq!(fresh.last_pane().as_deref(), Some("z2"));
+        fresh.focus("z2");
+        fresh.before.clear();
+        assert_eq!(fresh.last_pane().as_deref(), Some("z1"));
     }
 
     #[test]

@@ -244,6 +244,12 @@ Focus a pane (or the pane showing a terminal).
 | `pane` | no |
 | `terminal` | no |
 
+## `pane.last`
+
+Focus the pane focused before this one in the tab (again: back); with none yet, another pane of the tab.
+
+No arguments.
+
 ## `pane.go`
 
 Focus the pane to the "left", "right", "up" or "down".
