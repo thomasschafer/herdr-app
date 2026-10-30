@@ -1485,7 +1485,7 @@ impl AppWindow {
         for pr in &m.spaces {
             for (ci, ctx) in pr.tabs.iter().enumerate() {
                 for p in ctx.root.panes() {
-                    let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
+                    let focused = m.active_id() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
@@ -1509,7 +1509,7 @@ impl AppWindow {
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
-                        "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
+                        "focused": m.active_id() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
                 }
             }
@@ -1962,10 +1962,8 @@ impl AppWindow {
                 .cloned()
                 .or_else(|| rec.and_then(|r| r.get("foreground").and_then(|f| f.get("cwd")).or_else(|| r.get("cwd"))).and_then(Value::as_str).map(str::to_owned))
                 .unwrap_or_else(|| mods::home().to_string_lossy().into_owned());
-            let active = self.model.active.clone();
-            self.model.add_space(space, "", &folder, new_ctx);
+            self.model.insert_space(space, "", &folder, new_ctx);
             self.model.space_mut(space).unwrap().machine = machine;
-            self.model.active = active.or(Some(space.to_owned()));
             return;
         }
         let target = self.model.tab(&ctx_id).and_then(|c| c.root.panes().last().map(|p| p.id.clone()));
@@ -2185,7 +2183,7 @@ impl AppWindow {
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref())?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
-        self.model.active = Some(space.clone());
+        self.model.set_active(Some(space.clone()));
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
@@ -2202,7 +2200,7 @@ impl AppWindow {
         self.require_document(machine.as_deref())?;
         let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
         self.model.add_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })));
-        self.model.active = Some(space.clone());
+        self.model.set_active(Some(space.clone()));
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
@@ -2521,7 +2519,7 @@ impl AppWindow {
         }
         let (title, hint, current) = match name {
             "space.rename" => {
-                let id = Self::owned(&args, "id").or_else(|| self.model.active.clone());
+                let id = Self::owned(&args, "id").or_else(|| self.model.active_id().map(str::to_owned));
                 let current = id.as_deref().and_then(|i| self.model.space(i)).map(|p| p.name.clone());
                 args["id"] = json!(id);
                 ("rename space", "empty: named after its folder", current)
@@ -2548,7 +2546,7 @@ impl AppWindow {
                 self.answer(r);
             }
             "space.close" => {
-                let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to close") };
+                let Some(id) = Self::owned(a, "id").or_else(|| self.model.active_id().map(str::to_owned)) else { return self.fail("no space to close") };
                 let Some(p) = self.model.space(&id) else { return self.fail(format!("no space {id:?}")) };
                 if a.get("confirmed").and_then(Value::as_bool) != Some(true) {
                     if !person {
@@ -2563,7 +2561,7 @@ impl AppWindow {
                 self.kill(&addrs);
             }
             "space.rename" => {
-                let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
+                let Some(id) = Self::owned(a, "id").or_else(|| self.model.active_id().map(str::to_owned)) else { return self.fail("no space to rename") };
                 let Some(name) = Self::arg(a, "name") else { return self.fail("space.rename needs name (empty: automatic)") };
                 let Some(p) = self.model.space_mut(&id) else { return self.fail(format!("no space {id:?}")) };
                 p.name = name.trim().to_owned();
@@ -2578,7 +2576,7 @@ impl AppWindow {
                     self.model.spaces.get(i.checked_sub(1)?).map(|p| p.id.clone())
                 });
                 match id.filter(|id| self.model.space(id).is_some()) {
-                    Some(id) => self.model.active = Some(id),
+                    Some(id) => self.model.set_active(Some(id)),
                     None => return self.fail("no such space"),
                 }
             }
@@ -2586,7 +2584,12 @@ impl AppWindow {
                 let n = self.model.spaces.len();
                 if let Some(i) = self.model.active_index().filter(|_| n > 0) {
                     let j = if name == "space.next" { (i + 1) % n } else { (i + n - 1) % n };
-                    self.model.active = Some(self.model.spaces[j].id.clone());
+                    self.model.set_active(Some(self.model.spaces[j].id.clone()));
+                }
+            }
+            "space.last" => {
+                if let Some(id) = self.model.previous_space().map(str::to_owned) {
+                    self.model.set_active(Some(id));
                 }
             }
             // ---- tabs
@@ -3343,7 +3346,7 @@ impl AppWindow {
                 "zoom": round(settings::zoom()),
                 "font_size": round(settings::font_size()),
                 "ui_font_size": round(settings::ui_font_size()),
-                "space": self.model.active,
+                "space": self.model.active_id(),
                 "tab": self.model.active_tab().map(|c| c.id.clone()),
                 "focused_pane": self.focused_pane,
                 "layout": self.layout_name,
@@ -3395,7 +3398,7 @@ impl AppWindow {
                         json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms })
                     })
                     .collect();
-                json!({ "id": p.id, "name": m.space_name(p, &home()), "folder": p.folder, "machine": p.machine, "active": m.active.as_deref() == Some(&p.id), "tabs": tabs })
+                json!({ "id": p.id, "name": m.space_name(p, &home()), "folder": p.folder, "machine": p.machine, "active": m.active_id() == Some(&p.id), "tabs": tabs })
             })
             .collect();
         json!({ "spaces": spaces, "recent": m.recent })

@@ -184,6 +184,12 @@ Show the previous space.
 
 No arguments.
 
+## `space.last`
+
+Show the space shown before this one (again: back), like tmux's last-window.
+
+No arguments.
+
 ## `tab.select`
 
 Show a tab (by position in the space, or id).

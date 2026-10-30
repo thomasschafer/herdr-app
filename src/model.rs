@@ -72,8 +72,11 @@ pub struct Agent {
 #[derive(Default)]
 pub struct Model {
     pub spaces: Vec<Space>,
-    /// The selected space.
-    pub active: Option<String>,
+    /// The selected space: changed only through `set_active`, which
+    /// remembers the one it leaves for `space.last`.
+    active: Option<String>,
+    /// The space selected before the current one.
+    previous: Option<String>,
     pub recent: Vec<Recent>,
     /// Each pane's live folder, for its display name.
     pub pane_folders: BTreeMap<String, String>,
@@ -181,6 +184,26 @@ impl Model {
         true
     }
 
+    /// The selected space's id.
+    pub fn active_id(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+
+    /// Selects a space, remembering the one it leaves.
+    pub fn set_active(&mut self, id: Option<String>) {
+        if self.active != id
+            && let Some(old) = self.active.take()
+        {
+            self.previous = Some(old);
+        }
+        self.active = id;
+    }
+
+    /// The space shown before the current one, while it still exists.
+    pub fn previous_space(&self) -> Option<&str> {
+        self.previous.as_deref().filter(|p| self.active.as_deref() != Some(*p) && self.space(p).is_some())
+    }
+
     pub fn active_index(&self) -> Option<usize> {
         let id = self.active.as_deref()?;
         self.spaces.iter().position(|p| p.id == id).or((!self.spaces.is_empty()).then_some(0))
@@ -251,10 +274,18 @@ impl Model {
     }
 
     pub fn add_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
+        self.insert_space(id, name, folder, ctx);
+        self.set_active(Some(id.to_owned()));
+    }
+
+    /// Adds a space without showing it (unless there's nothing shown yet).
+    pub fn insert_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
         let active = Some(ctx.id.clone());
         self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
         self.recent.retain(|r| r.name != name);
-        self.active = Some(id.to_owned());
+        if self.active.is_none() {
+            self.active = Some(id.to_owned());
+        }
     }
 
     /// Adds a tab after the space's selected one and selects it (not the space).
@@ -368,7 +399,8 @@ impl Model {
         self.recent.insert(0, Recent { name: p.name.clone(), folder: p.folder.clone() });
         self.recent.truncate(20);
         if was_active {
-            self.active = self.spaces.get(pi).or(self.spaces.last()).map(|p| p.id.clone());
+            let next = self.spaces.get(pi).or(self.spaces.last()).map(|p| p.id.clone());
+            self.set_active(next);
         }
         p.tabs.iter().flat_map(|c| addresses(&c.root)).collect()
     }
@@ -382,7 +414,8 @@ impl Model {
     pub fn select_tab(&mut self, ctx: &str) -> bool {
         let Some(p) = self.spaces.iter_mut().find(|p| p.tab(ctx).is_some()) else { return false };
         p.select(ctx);
-        self.active = Some(p.id.clone());
+        let id = p.id.clone();
+        self.set_active(Some(id));
         self.unsettle(ctx);
         true
     }
@@ -596,7 +629,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
         "folder": p.folder,
         "machine": p.machine,
         "branch": branch,
-        "active": m.active.as_deref() == Some(&p.id),
+        "active": m.active_id() == Some(&p.id),
         "status": m.rollup(&all),
         "tabs": tabs,
     })
@@ -667,6 +700,32 @@ mod tests {
     }
 
     #[test]
+    fn the_last_space_is_the_one_shown_before_and_toggles_back() {
+        let mut m = model_with_one();
+        assert_eq!(m.previous_space(), None, "nothing shown before");
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "x", "x2", "t2"));
+        m.add_space("p3", "docs", "/src/docs", Tab::new("c3", "x", "x3", "t3"));
+        assert_eq!(m.previous_space(), Some("p2"));
+        m.set_active(Some("p1".into()));
+        assert_eq!(m.previous_space(), Some("p3"));
+        m.set_active(Some("p3".into()));
+        assert_eq!(m.previous_space(), Some("p1"), "toggles");
+        m.set_active(Some("p3".into()));
+        assert_eq!(m.previous_space(), Some("p1"), "showing the shown one again keeps it");
+        // Showing a tab or pane in another space counts as a switch.
+        m.focus_pane("x2");
+        assert_eq!(m.previous_space(), Some("p3"));
+        // A space found in the background isn't a switch.
+        m.insert_space("p4", "found", "/src/found", Tab::new("c4", "", "x4", "t4"));
+        assert_eq!((m.active_id(), m.previous_space()), (Some("p2"), Some("p3")));
+        // A closed one is no longer a place to go back to.
+        m.remove_space("p3");
+        assert_eq!(m.previous_space(), None);
+        m.remove_space("p2");
+        assert_eq!(m.previous_space(), None, "closing the shown one shows a neighbor, not one that's gone");
+    }
+
+    #[test]
     fn settling_the_shown_tab_hands_over_and_showing_it_brings_it_back() {
         let mut m = model_with_one();
         m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
@@ -686,9 +745,9 @@ mod tests {
         let mut m = model_with_one();
         m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
         m.add_space("p2", "web", "/src/web", Tab::new("c3", "deploy", "x3", "t3"));
-        assert_eq!(m.active.as_deref(), Some("p2"));
+        assert_eq!(m.active_id(), Some("p2"));
         assert_eq!(m.remove_pane("x3"), (true, true));
-        assert_eq!(m.active.as_deref(), Some("p1"));
+        assert_eq!(m.active_id(), Some("p1"));
         assert_eq!(m.recent, [Recent { name: "web".into(), folder: "/src/web".into() }]);
         // A tab closes with its last pane; the space stays while it has another.
         assert_eq!(m.remove_pane("x2"), (true, false));
@@ -834,7 +893,7 @@ mod tests {
         assert_eq!(m.focused_pane().as_deref(), Some("x2"));
         m.add_space("p2", "web", "/w", Tab::new("c3", "c", "x3", "t3"));
         assert!(m.focus_pane("x1"));
-        assert_eq!(m.active.as_deref(), Some("p1"));
+        assert_eq!(m.active_id(), Some("p1"));
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         assert_eq!(m.visible_addresses(), ["t1"]);
     }

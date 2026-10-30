@@ -484,7 +484,8 @@ The main ones:
   terminals start in that machine's home unless folder, and its tabs and
   splits stay there; `spaces()` gives each space's `machine`, null here),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
-  `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
+  `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`,
+  `space.last` (the space shown before this one; again: back).
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
 - Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
   agent to run, task: its first message), or `tab.new {name?, space?, mod,

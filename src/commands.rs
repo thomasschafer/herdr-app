@@ -50,6 +50,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
     cmd("space.next", &[], "Show the next space."),
     cmd("space.prev", &[], "Show the previous space."),
+    cmd("space.last", &[], "Show the space shown before this one (again: back), like tmux's last-window."),
     cmd("tab.select", &[opt("index"), opt("id")], "Show a tab (by position in the space, or id)."),
     cmd("tab.settle", &[opt("id")], "Put a tab away on this screen (default: the shown one): out of the lists, still running. It comes back when shown or when an agent in it needs you."),
     cmd("tab.unsettle", &[opt("id")], "Bring a settled tab back to the lists."),
