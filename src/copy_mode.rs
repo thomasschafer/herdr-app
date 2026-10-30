@@ -48,7 +48,7 @@ pub struct CopyMode {
 }
 
 /// What copy mode shows over the viewport, in viewport cells.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct View {
     /// The copy cursor (column, row), when it's in view.
     pub cursor: Option<(u16, u16)>,
@@ -534,8 +534,14 @@ mod tests {
 
     #[test]
     fn it_starts_at_the_programs_cursor() {
-        let (vt, c) = copying(20, 4, "one\ntwo\n$ ls");
+        let (mut vt, mut c) = copying(20, 4, "one\ntwo\n$ ls");
         assert_eq!(at(&vt, &c), (2, 4));
+        let view = c.view(&mut vt);
+        assert_eq!((view.cursor, view.status.as_str()), (Some((4, 2)), "COPY"), "drawn there, in view");
+        // Scrolled back (output above the screen), it's still the cursor's own cell.
+        let text: String = (0..30).map(|i| format!("{i}\n")).collect();
+        let (mut vt, mut c) = copying(20, 4, &format!("{text}$ ls"));
+        assert_eq!(c.view(&mut vt).cursor, Some((4, 3)));
     }
 
     #[test]

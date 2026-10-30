@@ -1058,7 +1058,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
-    let copy = g.copy_view.take();
+    let copy = g.copy_view.clone();
     drop(g);
 
     window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
