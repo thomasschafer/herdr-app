@@ -340,6 +340,11 @@ impl Core {
         let _ = self.writer.send(encode(channel, kind, payload));
     }
 
+    /// Whether the core's hello lists `feature`.
+    pub fn has_feature(&self, feature: &str) -> bool {
+        self.hello.get("features").and_then(Value::as_array).is_some_and(|f| f.iter().any(|f| f == feature))
+    }
+
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         self.call_timeout(method, params, Duration::from_secs(10))
     }
@@ -366,9 +371,18 @@ impl Core {
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
-    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>) -> Result<String> {
+    /// `typed`: a line typed into it as it starts, then Enter (the core checks it).
+    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, typed: Option<&str>) -> Result<String> {
         let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
-        let r = self.call("terminal.run", json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true}))?;
+        let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true});
+        if let Some(line) = typed {
+            // An older core would start the terminal and drop the line.
+            if !self.has_feature("type") {
+                bail!("this herdr-core can't type into a new terminal: update it (hc update)");
+            }
+            params["type"] = json!(line);
+        }
+        let r = self.call("terminal.run", params)?;
         r.get("address")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -492,19 +506,53 @@ mod tests {
         assert!(replacement.push(b"{\"method\":\"missed\"}\n").docs);
     }
 
-    #[test]
-    fn calls_after_disconnect_fail_without_waiting_for_a_reply() {
-        let (writer, _frames) = mpsc::channel();
+    /// A core connection with nothing behind it: the frames the app sends come out of the receiver.
+    fn fake_core(hello: Value, closed: bool) -> (Arc<Core>, mpsc::Receiver<Vec<u8>>) {
+        let (writer, frames) = mpsc::channel();
         let (_lost_tx, lost) = async_channel::bounded(1);
         let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let core = Core {
-            hello: Value::Null,
+            hello,
             writer,
-            routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
+            routes: Arc::new(Mutex::new(Routes { closed, ..Default::default() })),
             next_id: AtomicU64::new(1),
             child: Mutex::new(child),
             lost,
         };
+        (Arc::new(core), frames)
+    }
+
+    /// Starts a terminal through `core.run` and answers as a core would; returns the request.
+    fn run_through(core: &Arc<Core>, frames: &mpsc::Receiver<Vec<u8>>, typed: Option<&'static str>) -> Value {
+        let caller = core.clone();
+        let ran = std::thread::spawn(move || caller.run(vec!["sh".into()], Some("/tmp".into()), json!({}), None, typed));
+        let frame = frames.recv_timeout(Duration::from_secs(5)).expect("the request reached the core");
+        let (_, kind, payload) = read_frame(&mut frame.as_slice()).unwrap();
+        assert_eq!(kind, DATA);
+        let req: Value = serde_json::from_slice(&payload).unwrap();
+        let reply = core.routes.lock().unwrap().replies.remove(&req["id"].as_u64().unwrap()).unwrap();
+        reply.send(Ok(json!({"address": "t5"}))).unwrap();
+        assert_eq!(ran.join().unwrap().unwrap(), "t5");
+        assert_eq!(req["method"], "terminal.run");
+        req["params"].clone()
+    }
+
+    #[test]
+    fn a_line_to_type_reaches_the_core_only_when_the_core_can_type_it() {
+        let (core, frames) = fake_core(json!({"features": ["shell", "type"]}), false);
+        let params = run_through(&core, &frames, Some("hx ."));
+        assert_eq!((params["type"].as_str(), params["argv"][0].as_str(), params["keep"].as_bool()), (Some("hx ."), Some("sh"), Some(true)));
+        assert!(run_through(&core, &frames, None).get("type").is_none(), "nothing to type: no type");
+
+        let (old, frames) = fake_core(json!({"features": ["shell"]}), false);
+        let err = old.run(vec![], None, json!({}), None, Some("hx .")).unwrap_err().to_string();
+        assert!(err.contains("can't type into a new terminal"), "{err}");
+        assert!(frames.try_recv().is_err(), "an older core gets nothing: it would drop the line and start a plain shell");
+    }
+
+    #[test]
+    fn calls_after_disconnect_fail_without_waiting_for_a_reply() {
+        let (core, _frames) = fake_core(Value::Null, true);
         let start = std::time::Instant::now();
         assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));

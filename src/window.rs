@@ -2107,15 +2107,16 @@ impl AppWindow {
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell.
-    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>) -> Result<String, String> {
+    /// `typed`: a line typed into it as it starts, then Enter.
+    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>, typed: Option<&str>) -> Result<String, String> {
         let argv = argv.unwrap_or_default();
         let cwd = Some(cwd).filter(|c| !c.is_empty());
         self.require_document(on)?;
         let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on) });
-        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on) {
+        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, typed) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels, on)
+                self.core.run(Self::powershell_argv(&argv), cwd, labels, on, typed)
             }
             r => r,
         }
@@ -2155,7 +2156,7 @@ impl AppWindow {
 
     /// A space with its first tab and terminal, shown at once.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
-    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>) -> Result<Value, String> {
+    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, typed: Option<&str>) -> Result<Value, String> {
         let on = machine.as_deref();
         // The focused pane's folder only means something on its own machine.
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
@@ -2163,7 +2164,7 @@ impl AppWindow {
             .and_then(|a| self.cwds.get(&a).cloned());
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on)?;
+        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on, typed)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2173,7 +2174,7 @@ impl AppWindow {
     }
 
     /// A tab in a space (default: the shown one), shown at once.
-    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>) -> Result<Value, String> {
+    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, typed: Option<&str>) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
@@ -2181,7 +2182,7 @@ impl AppWindow {
         let folder = folder.unwrap_or_else(|| self.folder_for(&space));
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref())?;
+        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref(), typed)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.set_active(Some(space.clone()));
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -2204,16 +2205,17 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>) -> Result<Value, String> {
+    /// A terminal beside the target, in `folder` (default: where the target is now).
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, typed: Option<&str>) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
-        let (space, ctx, folder) = (p.id.clone(), c.id.clone(), p.folder.clone());
+        let (space, ctx, space_folder) = (p.id.clone(), c.id.clone(), p.folder.clone());
         let target_addr = self.model.address_of(&target);
-        let cwd = target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(folder);
+        let cwd = folder.or_else(|| target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned())).unwrap_or(space_folder);
         // A split stays on the machine of the pane it splits (else its space's).
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
-        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref())?;
+        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref(), typed)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -2415,6 +2417,15 @@ impl AppWindow {
         args.get("argv").and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
+    /// `type`, a line typed into a new terminal as it starts: text, or absent.
+    fn typed(args: &Value) -> Result<Option<&str>, String> {
+        match args.get("type") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(line)) => Ok(Some(line)),
+            Some(other) => Err(format!("type is a line of text to type, not {other}")),
+        }
+    }
+
     fn arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
         args.get(k).and_then(Value::as_str)
     }
@@ -2542,7 +2553,7 @@ impl AppWindow {
             // ---- spaces
             "space.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()));
+                let r = Self::typed(a).and_then(|typed| self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), typed));
                 self.answer(r);
             }
             "space.close" => {
@@ -2595,9 +2606,11 @@ impl AppWindow {
             // ---- tabs
             "tab.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = match Self::owned(a, "mod") {
-                    Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task")),
+                let r = match (Self::owned(a, "mod"), Self::typed(a)) {
+                    (_, Err(e)) => Err(e),
+                    (Some(_), Ok(Some(_))) => Err("tab.new: a mod has no terminal to type into: give mod or type, not both".into()),
+                    (Some(m), Ok(None)) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
+                    (None, Ok(typed)) => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), typed),
                 };
                 self.answer(r);
             }
@@ -2663,9 +2676,11 @@ impl AppWindow {
                     Some("down") => Axis::Column,
                     other => return self.fail(format!("pane.split direction is \"right\" or \"down\", not {other:?}")),
                 };
-                let r = match Self::owned(a, "mod") {
-                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a)),
+                let r = match (Self::owned(a, "mod"), Self::typed(a)) {
+                    (_, Err(e)) => Err(e),
+                    (Some(_), Ok(Some(_))) => Err("pane.split: a mod has no terminal to type into: give mod or type, not both".into()),
+                    (Some(name), Ok(None)) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
+                    (None, Ok(typed)) => self.split(Self::owned(a, "pane"), axis, Self::argv(a), Self::owned(a, "folder"), typed),
                 };
                 self.answer(r);
             }
@@ -2744,14 +2759,18 @@ impl AppWindow {
             // ---- terminals
             "terminal.open" => {
                 let argv = Self::argv(a);
+                let typed = match Self::typed(a) {
+                    Ok(typed) => typed,
+                    Err(e) => return self.fail(e),
+                };
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv),
-                    "down" => self.split(None, Axis::Column, argv),
+                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), typed),
+                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), typed),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, typed)
                     }
                 };
                 self.answer(r);
@@ -4586,4 +4605,16 @@ mod tests {
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
     }
 
+
+    #[test]
+    fn a_line_to_type_is_text_or_absent_never_quietly_dropped() {
+        use serde_json::json;
+        let typed = |a| super::AppWindow::typed(&a).map(|t| t.map(str::to_owned));
+        assert_eq!(typed(json!({ "type": "hx ." })), Ok(Some("hx .".into())));
+        assert_eq!(typed(json!({})), Ok(None));
+        assert_eq!(typed(json!({ "type": null })), Ok(None));
+        for bad in [json!({ "type": 7 }), json!({ "type": ["hx"] })] {
+            assert!(typed(bad.clone()).unwrap_err().contains("a line of text"), "{bad}");
+        }
+    }
 }

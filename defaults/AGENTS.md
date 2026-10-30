@@ -482,7 +482,7 @@ valid names; they never fall back to the current target. For example, closing a
 space uses `herdr-app do space.close --id <id> --confirmed true`, not `--space`.
 The main ones:
 
-- Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?}`
+- Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?, type?}`
   (machine: another machine from `hc machine ls`; the space lives there, its
   terminals start in that machine's home unless folder, and its tabs and
   splits stay there; `spaces()` gives each space's `machine`, null here),
@@ -490,7 +490,12 @@ The main ones:
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`,
   `space.last` (the space shown before this one; again: back).
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
-- Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
+  `type` (on every command that starts a terminal): a line typed into the new
+  terminal as it starts, then Enter, as if typed ahead: with no `argv` its shell
+  runs it as soon as it's ready, keeps it in its history and stays when it ends
+  (`pane.split {direction: "right", type: "hx ."}`). Plain text under 1024 bytes;
+  a newline or other control character fails the command.
+- Tabs: `tab.new {name?, space?, folder?, argv?, task?, type?}` (argv: an
   agent to run, task: its first message), or `tab.new {name?, space?, mod,
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
@@ -499,8 +504,8 @@ The main ones:
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
-- Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+- Panes: `pane.split {direction: "right" | "down", pane?, argv?, folder?, type? | mod?, props?}` (a new
+  terminal, in folder or where the split pane is now, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`,
   `pane.last` (the pane focused before this one in the tab, again: back; with no
   history yet, another pane of the tab).
@@ -510,7 +515,7 @@ The main ones:
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
-- Terminals: `terminal.open {argv?, folder?, place?, name?}`, `terminal.kill {terminal}`,
+- Terminals: `terminal.open {argv?, folder?, place?, name?, type?}`, `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.copy`,

@@ -19,7 +19,7 @@ Mods can add their own actions, which are not listed here.
 
 ## `space.new`
 
-Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder).
+Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder), and `type`, a line typed into its terminal as it starts, then Enter (a shell runs it once ready, keeps it in its history and stays when it ends).
 
 | Argument | Required |
 |---|---|
@@ -29,6 +29,7 @@ Make a space: its name (default: none, so it's called after where its first term
 | `argv` | no |
 | `task` | no |
 | `machine` | no |
+| `type` | no |
 
 ## `space.close`
 
@@ -59,7 +60,7 @@ Move a space to a position (1 = first).
 
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board).
+Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task), and `type`, a line typed into its terminal as it starts, then Enter (a shell runs it once ready, keeps it in its history and stays when it ends); or with a mod as its only pane (`mod`, its `props`: a file, a board).
 
 | Argument | Required |
 |---|---|
@@ -68,6 +69,7 @@ Make a tab in a space (default: the selected one; name default: none, so it's ca
 | `folder` | no |
 | `argv` | no |
 | `task` | no |
+| `type` | no |
 | `mod` | no |
 | `props` | no |
 
@@ -100,13 +102,15 @@ Move a tab to a position in its space (1 = first).
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the focused one) "right" or "down" with a new terminal in folder (default: where that pane is now) and `type`, a line typed into its terminal as it starts, then Enter (a shell runs it once ready, keeps it in its history and stays when it ends); or with a mod (`mod`, its `props`) beside it.
 
 | Argument | Required |
 |---|---|
 | `direction` | yes |
 | `pane` | no |
 | `argv` | no |
+| `folder` | no |
+| `type` | no |
 | `mod` | no |
 | `props` | no |
 
@@ -120,7 +124,7 @@ Close a pane and end its terminal.
 
 ## `terminal.open`
 
-Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
+Start a terminal in folder: as a new tab (place "tab", default), or "right"/"down" of the focused pane; `type`, a line typed into its terminal as it starts, then Enter (a shell runs it once ready, keeps it in its history and stays when it ends).
 
 | Argument | Required |
 |---|---|
@@ -128,6 +132,7 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 | `folder` | no |
 | `place` | no |
 | `name` | no |
+| `type` | no |
 
 ## `terminal.keep`
 

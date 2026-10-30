@@ -47,15 +47,15 @@ export function playSound(sound: string): null;
  * the call returns; terminal.keep/park finish in the background and toast on failure.
  * A rename without a name is asked for;
  * "" gives the space or tab Herdr's automatic name again. The main ones:
- * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?}, space.close {id?}, space.rename {id?, name},
+ * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, type?}, space.close {id?}, space.rename {id?, name},
  *   space.move {id, index}, space.select {index | id}, space.next, space.prev, space.last (the one shown before).
- * Tabs: tab.new {name?, space?, folder?, argv?, task?} (argv: an agent, task: its first message)
+ * Tabs: tab.new {name?, space?, folder?, argv?, task?, type?} (argv: an agent, task: its first message)
  *   or {name?, space?, mod, props?} (a tab whose only pane is a mod),
  *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
  *   tab.next, tab.prev.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
+ * Panes: pane.split {direction: "right" | "down", pane?, argv?, folder?, type?} (type, on any command that starts a terminal: a line typed into it as it starts, then Enter), pane.close {pane?}, pane.zoom {pane?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {direction}, pane.last (the tab's pane focused before). Pane menus get target { pane, terminal }.
- * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
+ * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down", type?}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
