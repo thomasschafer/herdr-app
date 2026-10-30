@@ -919,8 +919,17 @@ impl Vt {
     /// Option for "\u{df}" on a Mac), as Ghostty reports them. Without it the
     /// kitty keyboard protocol reports shift+; and Neovim never sees ":".
     pub fn encode_key(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>) -> Vec<u8> {
+        self.encode_key_with(key, mods, consumed, text, unshifted, false)
+    }
+
+    /// `encode_key`, saying whether this press's Option key is Alt on a Mac
+    /// (`macos_option_as_alt`). Elsewhere Alt is always Alt.
+    pub fn encode_key_with(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>, option_is_alt: bool) -> Vec<u8> {
         unsafe {
             ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
+            // Reset by the call above: it can't be read from the terminal.
+            let option = if option_is_alt { GHOSTTY_OPTION_AS_ALT_TRUE } else { GHOSTTY_OPTION_AS_ALT_FALSE };
+            ghostty_key_encoder_setopt(self.keys, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, &option as *const _ as *const c_void);
             let e = self.key_event;
             ghostty_key_event_set_action(e, GHOSTTY_KEY_ACTION_PRESS);
             ghostty_key_event_set_key(e, key);

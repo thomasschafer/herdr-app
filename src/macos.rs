@@ -21,6 +21,22 @@ pub fn init(cx: &mut App) {
     ])]);
 }
 
+/// Whether the right Option key is down now. GPUI's key events don't say
+/// which Option key it was; this is read while the press is being handled.
+pub fn right_option_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceFlagsState(state: i32) -> u64;
+    }
+    const COMBINED_SESSION_STATE: i32 = 0;
+    // IOKit's NX_DEVICELALTKEYMASK / NX_DEVICERALTKEYMASK.
+    const LEFT: u64 = 0x20;
+    const RIGHT: u64 = 0x40;
+    let flags = unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) };
+    // Both held: the left one counts, so a left-only setting stays Alt.
+    flags & RIGHT != 0 && flags & LEFT == 0
+}
+
 pub fn action(name: &str) -> Option<Box<dyn Action>> {
     match name {
         "app.quit" => Some(Box::new(Quit)),

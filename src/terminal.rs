@@ -426,7 +426,7 @@ impl TerminalView {
         }
         let bytes = Keystroke::parse("ctrl-v").ok().and_then(|keystroke| {
             let event = KeyDownEvent { keystroke, is_held: false, prefer_character_input: false };
-            key_bytes(&mut self.grid.borrow_mut().vt, &event)
+            key_bytes(&mut self.grid.borrow_mut().vt, &event, false)
         });
         if let Some(bytes) = bytes {
             self.send(&bytes);
@@ -460,7 +460,7 @@ impl TerminalView {
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
             self.grid.borrow_mut().vt.clear_selection();
         }
-        let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
+        let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev, option_is_alt());
         if let Some(bytes) = bytes {
             self.send(&bytes);
             cx.stop_propagation();
@@ -700,9 +700,19 @@ fn is_icon(text: &str) -> bool {
     matches!((chars.next(), chars.next()), (Some(c), None) if matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFD))
 }
 
+/// Whether the Option key held now is Alt (settings.json's
+/// `macos_option_as_alt`). Only a Mac's Option types characters.
+fn option_is_alt() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::settings::get().macos_option_as_alt.applies(crate::macos::right_option_down());
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// What a key press sends to the program: the key described to libghostty,
 /// which encodes it once, in the mode the program asked for (as Ghostty does).
-fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
+/// `option_is_alt`: on a Mac, Option is Alt for this press, not a key that types.
+fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent, option_is_alt: bool) -> Option<Vec<u8>> {
     // GPUI sets this preference on replayed shortcut prefixes too; only
     // Windows' native composition previews defer to the text input handler.
     #[cfg(windows)]
@@ -730,8 +740,13 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     if m.platform {
         mods |= GHOSTTY_MODS_SUPER as GhosttyMods;
     }
-    let text = match k.key.as_str() {
-        "space" => Some(" ".to_owned()),
+    // Option as Alt types what the key types without it, as Ghostty does:
+    // Option-b is Alt-b, not "\u{222b}"; Option-e is Alt-e, not a dead key.
+    let as_alt = cfg!(target_os = "macos") && m.alt && option_is_alt;
+    let mut chars = k.key.chars();
+    let text = match (k.key.as_str(), chars.next(), chars.next()) {
+        ("space", ..) => Some(" ".to_owned()),
+        (_, Some(c), None) if as_alt => Some(if m.shift { c.to_uppercase().collect() } else { c.to_string() }),
         _ => k.key_char.clone(),
     };
     // The modifiers that went into the text are used up, as Ghostty reports
@@ -739,10 +754,10 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     // character (Option-s -> "\u{df}" on a Mac), not when it didn't (Alt-b on
     // Linux stays Alt-b).
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
-    if m.alt && text.as_deref().is_some_and(|t| !t.is_ascii()) {
+    if m.alt && !as_alt && text.as_deref().is_some_and(|t| !t.is_ascii()) {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
-    Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
+    Some(vt.encode_key_with(key, mods, consumed, text.as_deref(), unshifted, as_alt))
 }
 
 fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
@@ -1443,7 +1458,7 @@ mod tests {
             ] {
                 let mut replay = press(spec, text);
                 replay.prefer_character_input = true;
-                assert_eq!(key_bytes(&mut vt, &replay).as_deref(), Some(expected), "{spec}");
+                assert_eq!(key_bytes(&mut vt, &replay, false).as_deref(), Some(expected), "{spec}");
             }
         }
     }
@@ -1463,7 +1478,8 @@ mod tests {
             ("space", Some(" "), b" ", b" ", b"\x1b[32u"),
             ("ctrl-c", None, b"\x03", b"\x1b[99;5u", b"\x1b[99;5u"),
             ("ctrl-space", None, b"\x00", b"\x1b[32;5u", b"\x1b[32;5u"),
-            ("alt-b", Some("b"), b"\x1bb", b"\x1b[98;3u", b"\x1b[98;3u"),
+            // A Mac's Option types (Ghostty's default there): see `option_as_alt_*`.
+            ("alt-b", Some("b"), if cfg!(target_os = "macos") { b"b" } else { b"\x1bb" }, b"\x1b[98;3u", b"\x1b[98;3u"),
             ("alt-s", Some("\u{df}"), "\u{df}".as_bytes(), "\u{df}".as_bytes(), b"\x1b[115;3u"),
             ("escape", None, b"\x1b", b"\x1b[27u", b"\x1b[27u"),
             ("enter", None, b"\r", b"\r", b"\x1b[13u"),
@@ -1483,7 +1499,7 @@ mod tests {
                 let mut vt = Vt::new(20, 3);
                 vt.write(setup);
                 let want: &[u8] = [*plain, *dis, *all][m];
-                let got = key_bytes(&mut vt, &press(spec, *typed)).unwrap_or_default();
+                let got = key_bytes(&mut vt, &press(spec, *typed), false).unwrap_or_default();
                 if got != want {
                     wrong.push(format!("{name:10} {spec:12} sent {:?}, Ghostty sends {:?}", String::from_utf8_lossy(&got), String::from_utf8_lossy(want)));
                 }
@@ -1492,13 +1508,55 @@ mod tests {
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
     }
 
+    /// `macos_option_as_alt`: Option-key presses as a Mac hands them over
+    /// (the character Option makes, "" for a dead key), sent as Ghostty sends
+    /// them with Option as Alt. Elsewhere Alt is always Alt and the setting
+    /// changes nothing.
+    #[test]
+    fn option_as_alt_sends_alt_instead_of_the_character() {
+        const KEYS: &[(&str, Option<&str>, &[u8], &[u8], &[u8])] = &[
+            // key, typed, plain, kitty disambiguate (>1u), kitty report-all (>9u)
+            ("alt-b", Some("\u{222b}"), b"\x1bb", b"\x1b[98;3u", b"\x1b[98;3u"),
+            ("alt-shift-b", Some("\u{131}"), b"\x1bB", b"\x1b[98;4u", b"\x1b[98;4u"),
+            ("alt-e", Some(""), b"\x1be", b"\x1b[101;3u", b"\x1b[101;3u"),
+            ("alt-.", Some("\u{2265}"), b"\x1b.", b"\x1b[46;3u", b"\x1b[46;3u"),
+            ("alt-3", Some("\u{a3}"), b"\x1b3", b"\x1b[51;3u", b"\x1b[51;3u"),
+            ("alt-backspace", None, b"\x1b\x7f", b"\x1b[127;3u", b"\x1b[127;3u"),
+            ("alt-left", None, b"\x1b[1;3D", b"\x1b[1;3D", b"\x1b[1;3D"),
+        ];
+        let modes: [(&str, &[u8]); 3] = [("plain", b""), ("kitty >1u", b"\x1b[>1u"), ("kitty >9u", b"\x1b[>9u")];
+        let mut wrong = Vec::new();
+        for (m, (name, setup)) in modes.iter().enumerate() {
+            for (spec, typed, plain, dis, all) in KEYS {
+                let mut vt = Vt::new(20, 3);
+                vt.write(setup);
+                let want: &[u8] = [*plain, *dis, *all][m];
+                let got = key_bytes(&mut vt, &press(spec, *typed), true).unwrap_or_default();
+                if cfg!(target_os = "macos") && got != want {
+                    wrong.push(format!("{name:10} {spec:14} sent {:?}, Ghostty sends {:?}", String::from_utf8_lossy(&got), String::from_utf8_lossy(want)));
+                }
+                // Off a Mac the setting is ignored: the same as without it.
+                let without = key_bytes(&mut vt, &press(spec, *typed), false).unwrap_or_default();
+                if !cfg!(target_os = "macos") && got != without {
+                    wrong.push(format!("{name:10} {spec:14} changed off a Mac: {:?}, not {:?}", String::from_utf8_lossy(&got), String::from_utf8_lossy(&without)));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+        // Without the setting, a Mac's Option types its character.
+        if cfg!(target_os = "macos") {
+            let mut vt = Vt::new(20, 3);
+            assert_eq!(key_bytes(&mut vt, &press("alt-b", Some("\u{222b}")), false).unwrap(), "\u{222b}".as_bytes());
+        }
+    }
+
     /// Without Kitty, Windows' ConPTY drops Shift+Enter as Ghostty sends it;
     /// a win32-input-mode request (even split across reads) sends modified
     /// Enter as a native key event instead.
     #[test]
     fn enter_with_a_modifier_goes_as_a_windows_key_event_when_the_program_asks() {
         let mut vt = Vt::new(20, 3);
-        let send = |vt: &mut Vt, spec| String::from_utf8(key_bytes(vt, &press(spec, None)).unwrap()).unwrap();
+        let send = |vt: &mut Vt, spec| String::from_utf8(key_bytes(vt, &press(spec, None), false).unwrap()).unwrap();
         assert_eq!(send(&mut vt, "shift-enter"), "\x1b[27;2;13~");
         vt.write(b"\x1b[?90");
         vt.write(b"01h");
@@ -1522,7 +1580,7 @@ mod tests {
                     ("ctrl-enter", b"\x1b[13;5u"),
                     ("alt-enter", b"\x1b[13;3u"),
                 ] {
-                    assert_eq!(key_bytes(&mut vt, &press(spec, None)).as_deref(), Some(expected), "flags={flags}, win32_first={win32_first}, {spec}");
+                    assert_eq!(key_bytes(&mut vt, &press(spec, None), false).as_deref(), Some(expected), "flags={flags}, win32_first={win32_first}, {spec}");
                 }
             }
         }
@@ -1545,7 +1603,7 @@ mod tests {
             (b"\x1b[=0;1u", win32),
         ] {
             vt.write(output);
-            assert_eq!(key_bytes(&mut vt, &press("shift-enter", None)).as_deref(), Some(expected), "output={output:?}");
+            assert_eq!(key_bytes(&mut vt, &press("shift-enter", None), false).as_deref(), Some(expected), "output={output:?}");
         }
     }
 }

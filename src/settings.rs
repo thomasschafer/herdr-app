@@ -320,6 +320,66 @@ pub struct Person {
     pub theme: Option<crate::layout::ThemeChoice>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+    /// macOS: which Option keys are Alt in terminals instead of typing characters.
+    #[serde(skip_serializing_if = "OptionAsAlt::is_off")]
+    pub macos_option_as_alt: OptionAsAlt,
+}
+
+/// Ghostty's `macos-option-as-alt`: `false` (Option types characters, the
+/// default), `true` (both Option keys are Alt), `"left"` or `"right"` (only
+/// that one is Alt; the other still types characters).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptionAsAlt {
+    #[default]
+    Off,
+    Both,
+    Left,
+    Right,
+}
+
+impl OptionAsAlt {
+    fn is_off(&self) -> bool {
+        *self == OptionAsAlt::Off
+    }
+
+    /// Whether an Option press is Alt, given which Option key is down.
+    pub fn applies(self, right: bool) -> bool {
+        match self {
+            OptionAsAlt::Off => false,
+            OptionAsAlt::Both => true,
+            OptionAsAlt::Left => !right,
+            OptionAsAlt::Right => right,
+        }
+    }
+}
+
+impl Serialize for OptionAsAlt {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OptionAsAlt::Off => s.serialize_bool(false),
+            OptionAsAlt::Both => s.serialize_bool(true),
+            OptionAsAlt::Left => s.serialize_str("left"),
+            OptionAsAlt::Right => s.serialize_str("right"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionAsAlt {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Side(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Bool(false) => Ok(OptionAsAlt::Off),
+            Raw::Bool(true) => Ok(OptionAsAlt::Both),
+            Raw::Side(s) if s == "left" => Ok(OptionAsAlt::Left),
+            Raw::Side(s) if s == "right" => Ok(OptionAsAlt::Right),
+            Raw::Side(s) => Err(serde::de::Error::custom(format!("macos_option_as_alt is true, false, \"left\" or \"right\", not {s:?}"))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -354,6 +414,7 @@ impl Default for Person {
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
+            macos_option_as_alt: OptionAsAlt::Off,
         }
     }
 }
@@ -383,6 +444,7 @@ pub struct Settings {
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub sounds: Sounds,
+    pub macos_option_as_alt: OptionAsAlt,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -420,6 +482,7 @@ impl Default for Settings {
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             sounds: Sounds::default(),
+            macos_option_as_alt: OptionAsAlt::Off,
         }
     }
 }
@@ -453,6 +516,7 @@ impl Settings {
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
+            macos_option_as_alt: person.macos_option_as_alt,
         }
     }
 }
@@ -753,11 +817,33 @@ mod tests {
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
     }
 
+    #[test]
+    fn option_as_alt_reads_like_ghosttys() {
+        let read = |v: &str| serde_json::from_str::<Person>(&format!("{{\"macos_option_as_alt\": {v}}}")).map(|p| p.macos_option_as_alt);
+        assert_eq!(serde_json::from_str::<Person>("{}").unwrap().macos_option_as_alt, OptionAsAlt::Off);
+        for (v, want) in [("false", OptionAsAlt::Off), ("true", OptionAsAlt::Both), ("\"left\"", OptionAsAlt::Left), ("\"right\"", OptionAsAlt::Right)] {
+            assert_eq!(read(v).unwrap(), want, "{v}");
+            let mut p = Person::default();
+            p.macos_option_as_alt = want;
+            let text = serde_json::to_string(&p).unwrap();
+            assert_eq!(serde_json::from_str::<Person>(&text).unwrap().macos_option_as_alt, want, "{text}");
+            assert_eq!(text.contains("macos_option_as_alt"), want != OptionAsAlt::Off, "the default isn't written");
+        }
+        for bad in ["\"both\"", "1"] {
+            assert!(read(bad).is_err(), "{bad}");
+        }
+        let sides = |o: OptionAsAlt| (o.applies(false), o.applies(true));
+        assert_eq!(sides(OptionAsAlt::Off), (false, false));
+        assert_eq!(sides(OptionAsAlt::Both), (true, true));
+        assert_eq!(sides(OptionAsAlt::Left), (true, false));
+        assert_eq!(sides(OptionAsAlt::Right), (false, true));
+    }
+
     /// The guide agents read (written to the home folder) explains every
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), macos_option_as_alt: OptionAsAlt::Both, ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
