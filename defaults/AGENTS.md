@@ -455,8 +455,10 @@ the build doesn't do.
 ```
 
 - Sections: `global`, `layout:<name>` (while `layouts/<name>.json` shows),
-  `terminal` (a terminal has focus), `mod:<name>`. The more specific section
-  wins: `layout:terminals` over `global`, `terminal` over both.
+  `terminal` (a terminal has focus), `copy_mode` (a focused terminal is in copy
+  mode: `terminal`'s keys are off, the rest go to copy mode), `mod:<name>`. The
+  more specific section wins: `layout:terminals` over `global`, `terminal` and
+  `copy_mode` over both.
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
@@ -511,7 +513,14 @@ The main ones:
 - Terminals: `terminal.open {argv?, folder?, place?, name?}`, `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
-  `terminal.show {terminal?, pane?}`, `terminal.copy`, `terminal.paste` (an image
+  `terminal.show {terminal?, pane?}`, `terminal.copy`,
+  `terminal.copy_mode` (Herdr's vim copy mode in the focused terminal: h j k l and
+  arrows, w b e W B E, 0 ^ _ $ Home End, g G, H M L, { }, ctrl+u/d/b/f and
+  PageUp/PageDown move over its text and scrollback; v or Space, V select
+  (characters, lines); / and ? search (a capital letter: exact case), n and N
+  repeat; y or Enter copy the selection, else the match at the cursor, and leave;
+  Escape clears the selection and search, then leaves; q leaves. A click moves the
+  cursor, input for the program (a paste) leaves it), `terminal.paste` (an image
   alone, into a terminal on another machine: copied there, its path pasted; a
   local program reads the clipboard itself), `terminal.paste_image` (Ctrl+V: the
   same for an image; otherwise Ctrl+V goes to the program),

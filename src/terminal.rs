@@ -1,6 +1,7 @@
 //! A pane showing one core terminal: bytes in from the core, frames drawn
 //! with GPUI, keys and mouse encoded by libghostty-vt and sent back.
 
+use crate::copy_mode::{CopyMode, Outcome};
 use crate::hc::{Core, Stream};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
@@ -66,6 +67,10 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>)>,
     /// The font size, cell size, font and fonts loaded the drawings were built with.
     painted_with: (u32, Size<Pixels>, String, u64),
+    /// Copy mode, while it's on: its pins and search belong to this `vt`.
+    copy: Option<CopyMode>,
+    /// What copy mode shows this frame.
+    copy_view: Option<crate::copy_mode::View>,
 }
 
 pub struct TerminalView {
@@ -147,6 +152,8 @@ impl TerminalView {
                 cursor_at: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0),
+                copy: None,
+                copy_view: None,
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -184,6 +191,8 @@ impl TerminalView {
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
             let (cw, ch) = (f32::from(g.cell.width) as u32, f32::from(g.cell.height) as u32);
+            // Copy mode's pins are the old terminal's.
+            g.copy = None;
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cw, ch);
             g.core = core.clone();
@@ -357,6 +366,10 @@ impl TerminalView {
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
+        // Input for the program (a paste, dropped files) ends copy mode.
+        if !bytes.is_empty() && let Some(c) = g.copy.take() {
+            c.finish(&mut g.vt, false);
+        }
         if let Some(ch) = g.channel
             && !bytes.is_empty()
         {
@@ -447,14 +460,57 @@ impl TerminalView {
 
     /// Copies the selection to the clipboard (and the primary selection on Linux).
     pub fn copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.grid.borrow().vt.selection_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            #[cfg(target_os = "linux")]
-            cx.write_to_primary(ClipboardItem::new_string(text));
+        let text = self.grid.borrow().vt.selection_text();
+        if let Some(text) = text {
+            write_clipboard(text, cx);
+        }
+    }
+
+    pub fn in_copy_mode(&self) -> bool {
+        self.grid.borrow().copy.is_some()
+    }
+
+    /// Copy mode: the keys move over the text and select it (`copy_mode.rs`).
+    /// Already on: it stays as it is.
+    pub fn enter_copy_mode(&mut self, cx: &mut Context<Self>) {
+        let g = &mut *self.grid.borrow_mut();
+        if g.copy.is_none() {
+            g.copy = Some(CopyMode::enter(&mut g.vt));
+        }
+        cx.notify();
+    }
+
+    /// Ends copy mode; `yank`: its text goes to the clipboard first.
+    fn leave_copy_mode(&mut self, yank: bool, cx: &mut Context<Self>) {
+        let text = {
+            let g = &mut *self.grid.borrow_mut();
+            g.copy.take().and_then(|c| c.finish(&mut g.vt, yank))
+        };
+        if let Some(text) = text {
+            write_clipboard(text, cx);
+        }
+        cx.notify();
+    }
+
+    fn copy_mode_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let outcome = {
+            let g = &mut *self.grid.borrow_mut();
+            let c = g.copy.as_mut().expect("copy mode is on");
+            c.handle(&mut g.vt, &ev.keystroke)
+        };
+        match outcome {
+            Outcome::Stay => cx.notify(),
+            Outcome::Exit => self.leave_copy_mode(false, cx),
+            Outcome::Yank => self.leave_copy_mode(true, cx),
         }
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.in_copy_mode() {
+            // Copy mode's keys never reach the program.
+            cx.stop_propagation();
+            return self.copy_mode_key(ev, cx);
+        }
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
@@ -480,7 +536,10 @@ impl TerminalView {
             return;
         }
         let up = steps > 0;
-        if g.vt.mouse_tracking() {
+        if g.copy.is_some() {
+            // Copy mode reads the scrollback, whatever the program asked for.
+            g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
+        } else if g.vt.mouse_tracking() {
             let (x, y) = local(&g, ev.position);
             let button = if up { GHOSTTY_MOUSE_BUTTON_FOUR } else { GHOSTTY_MOUSE_BUTTON_FIVE };
             let size = grid_size(&g);
@@ -631,6 +690,13 @@ fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
     let path = std::env::temp_dir().join(format!("herdr-paste-{stamp}.{ext}"));
     std::fs::write(&path, &image.bytes).ok()?;
     Some(path)
+}
+
+/// To the clipboard (and the primary selection on Linux).
+fn write_clipboard(text: String, cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    cx.write_to_primary(ClipboardItem::new_string(text.clone()));
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
 }
 
 fn link_mods(m: &Modifiers) -> bool {
@@ -940,6 +1006,25 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
     ops
 }
 
+/// Copy mode's search matches on viewport row `y`: the theme's accent,
+/// stronger on the one at the cursor.
+fn paint_matches(
+    copy: Option<&crate::copy_mode::View>,
+    y: usize,
+    at: &impl Fn(usize, usize) -> Point<Pixels>,
+    snap_box: &impl Fn(Bounds<Pixels>) -> Bounds<Pixels>,
+    cell: Size<Pixels>,
+    window: &mut Window,
+) {
+    let Some(copy) = copy else { return };
+    let accent = crate::settings::color("accent");
+    for &(row, x0, x1) in copy.matches.iter().filter(|m| m.0 as usize == y) {
+        let current = copy.current == Some((row, x0, x1));
+        let b = Bounds::new(at(x0 as usize, y), size(cell.width * (x1 - x0 + 1) as f32, cell.height));
+        window.paint_quad(fill(snap_box(b), accent.opacity(if current { 0.55 } else { 0.3 })));
+    }
+}
+
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
@@ -973,6 +1058,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
+    let copy = g.copy_view.take();
     drop(g);
 
     window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
@@ -1019,7 +1105,13 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             }
             &painted[y].1
         };
-        for op in ops {
+        // Backgrounds first (row_ops puts them first), then copy mode's
+        // search matches over them, under the text.
+        let text_from = ops.iter().position(|op| !matches!(op, RowOp::Bg { .. })).unwrap_or(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            if i == text_from {
+                paint_matches(copy.as_ref(), y, &at, &snap_box, cell, window);
+            }
             match op {
                 RowOp::Bg { from, to, color } => {
                     let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
@@ -1033,6 +1125,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                     let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
                 }
             }
+        }
+        if text_from == ops.len() {
+            paint_matches(copy.as_ref(), y, &at, &snap_box, cell, window);
         }
     }
     {
@@ -1050,28 +1145,36 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
 
     paint_images(false, window);
 
-    if let Some(cur) = frame.cursor {
+    // A block with its character in the background's color over it.
+    let paint_block = |x: usize, y: usize, color: Hsla, window: &mut Window, cx: &mut App| {
+        let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
+        let p = at(x, y);
+        window.paint_quad(fill(snap_box(Bounds::new(p, size(cell.width * if wide { 2.0 } else { 1.0 }, cell.height))), color));
+        if let Some(c) = frame.rows.get(y).and_then(|r| r.get(x)).filter(|c| !c.text.is_empty()) {
+            let run = TextRun {
+                len: c.text.len(),
+                font: cell_font(c.bold, c.italic),
+                color: hsla(frame.bg),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
+            let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+        }
+    };
+    // In copy mode its cursor is the one shown, in the theme's cursor color.
+    if let Some((x, y)) = copy.as_ref().and_then(|c| c.cursor) {
+        paint_block(x as usize, y as usize, crate::settings::color("cursor"), window, cx);
+    }
+    if let Some(cur) = frame.cursor.filter(|_| copy.is_none()) {
         let (x, y) = (cur.x as usize, cur.y as usize);
         let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
         let w = cell.width * if wide { 2.0 } else { 1.0 };
         let color = hsla(cur.color);
         let p = at(x, y);
         match (focused, cur.shape) {
-            (true, CursorShape::Block) => {
-                window.paint_quad(fill(snap_box(Bounds::new(p, size(w, cell.height))), color));
-                if let Some(c) = frame.rows.get(y).and_then(|r| r.get(x)).filter(|c| !c.text.is_empty()) {
-                    let run = TextRun {
-                        len: c.text.len(),
-                        font: cell_font(c.bold, c.italic),
-                        color: hsla(frame.bg),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
-                    let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
-                }
-            }
+            (true, CursorShape::Block) => paint_block(x, y, color, window, cx),
             (true, CursorShape::Bar) => window.paint_quad(fill(snap_box(Bounds::new(p, size(px(2.0), cell.height))), color)),
             (true, CursorShape::Underline) => window.paint_quad(fill(
                 snap_box(Bounds::new(p + point(px(0.0), cell.height - px(2.0)), size(w, px(2.0)))),
@@ -1128,7 +1231,16 @@ impl EntityInputHandler for TerminalView {
     }
 
     fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, _w: &mut Window, cx: &mut Context<Self>) {
-        self.grid.borrow_mut().marked = None;
+        let mut g = self.grid.borrow_mut();
+        g.marked = None;
+        // In copy mode, typed text is for its search, never the program.
+        if let Some(c) = g.copy.as_mut() {
+            c.type_text(text);
+            drop(g);
+            cx.notify();
+            return;
+        }
+        drop(g);
         self.send(text.as_bytes());
         cx.notify();
     }
@@ -1168,6 +1280,17 @@ impl Render for TerminalView {
             }
         }
         let cell = cell_size(window);
+        // Copy mode ends when the text its cursor was on is gone (a reset).
+        let lost = {
+            let g = &mut *self.grid.borrow_mut();
+            g.copy_view = g.copy.as_mut().map(|c| c.view(&mut g.vt));
+            g.copy.as_ref().is_some_and(|c| c.cursor(&g.vt).is_none())
+        };
+        if lost {
+            self.leave_copy_mode(false, cx);
+            self.grid.borrow_mut().copy_view = None;
+        }
+        let copy_status = self.grid.borrow().copy_view.as_ref().map(|v| v.status.clone());
         let hover = self.grid.borrow().hover;
         let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
         let (link, spans) = found.unzip();
@@ -1181,7 +1304,8 @@ impl Render for TerminalView {
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
             .track_focus(&self.focus)
-            .key_context("Terminal")
+            // keys.json's `copy_mode` section, not `terminal`: copy mode has the keys.
+            .key_context(if copy_status.is_some() { "CopyMode" } else { "Terminal" })
             .size_full()
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
@@ -1215,6 +1339,17 @@ impl Render for TerminalView {
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }
                     this.link_click = true;
+                    return;
+                }
+                if this.in_copy_mode() {
+                    // A click puts copy mode's cursor there.
+                    let g = &mut *this.grid.borrow_mut();
+                    let (x, y) = local(g, ev.position);
+                    let col = (x / f32::from(g.cell.width)) as u16;
+                    let row = ((y / f32::from(g.cell.height)) as u16).min(g.vt.rows.saturating_sub(1));
+                    let c = g.copy.as_mut().expect("copy mode is on");
+                    c.click(&mut g.vt, col, row);
+                    cx.notify();
                     return;
                 }
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
@@ -1294,6 +1429,21 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .when_some(copy_status, |d, status| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_2()
+                        .right_3()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(crate::settings::color("accent"))
+                        .text_color(crate::settings::color("accent_foreground"))
+                        .text_xs()
+                        .child(status),
+                )
+            })
             .when_some(ended, |d, why| {
                 d.child(
                     div()

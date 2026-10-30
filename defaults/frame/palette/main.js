@@ -46,6 +46,7 @@ const NAMED = [
   ["mod.clone", {}, "Layout", "Duplicate mod", "clone copy customize"],
   ["terminal.open", {}, "Terminal", "New terminal", "shell"],
   ["terminal.copy", {}, "Terminal", "Copy", "clipboard"],
+  ["terminal.copy_mode", {}, "Terminal", "Copy mode", "scrollback vim select search yank"],
   ["terminal.paste", {}, "Terminal", "Paste", "clipboard"],
   ["agent.next", {}, "Agent", "Next agent", ""],
   ["agent.prev", {}, "Agent", "Previous agent", ""],

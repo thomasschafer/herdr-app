@@ -3,7 +3,8 @@
 //! ```json
 //! {
 //!   "global":   { "ctrl-shift-t": "tab.new", "ctrl-1": "tab.select:1" },
-//!   "terminal": { "ctrl-left": "send:\u001bb", "ctrl-shift-t": "terminal" },
+//!   "terminal": { "ctrl-left": "send:\u001bb", "ctrl-shift-t": "terminal", "ctrl-b": "terminal.copy_mode" },
+//!   "copy_mode": { "cmd-c": "terminal.copy" },
 //!   "layout:terminals": { "ctrl-]": "space.next" },
 //!   "mod:editor": { "ctrl-s": "editor.save" }
 //! }
@@ -64,11 +65,13 @@ fn tab(section: &str) -> Result<String, String> {
     match section {
         "global" => Ok("Herdr".into()),
         "terminal" => Ok("Terminal".into()),
+        // While a terminal is in copy mode: its keys instead of `terminal`'s.
+        "copy_mode" => Ok("CopyMode".into()),
         s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
             (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p}")),
             // While layouts/<name>.json is shown (the window's tab says which).
             (_, Some(l)) if !l.is_empty() => Ok(format!("layout == {l}")),
-            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),
+            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"copy_mode\", \"layout:<name>\" or \"mod:<name>\"")),
         },
     }
 }
@@ -201,6 +204,14 @@ mod tests {
         assert_eq!(super::current("context.new"), "tab.new");
         assert_eq!(super::current("mod.open:start"), "tab.new");
         assert_eq!(super::current("pane.zoom"), "pane.zoom");
+    }
+
+    #[test]
+    fn copy_mode_has_a_section_of_its_own() {
+        let keys = super::parse(r#"{ "terminal": { "ctrl-b": "terminal.copy_mode" }, "copy_mode": { "cmd-c": "terminal.copy", "x": "terminal" } }"#).unwrap();
+        let context = |k: &gpui::KeyBinding| k.predicate().map(|p| p.to_string());
+        assert_eq!(keys.iter().map(context).collect::<Vec<_>>(), [Some("CopyMode".into()), Some("CopyMode".into()), Some("Terminal".into())]);
+        assert!(super::parse(r#"{ "copy-mode": {} }"#).unwrap_err().contains("\"copy_mode\""));
     }
 
     #[test]

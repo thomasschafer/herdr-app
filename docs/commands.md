@@ -289,6 +289,12 @@ Copy the focused terminal's selection.
 
 No arguments.
 
+## `terminal.copy_mode`
+
+Copy mode in the focused terminal: vim keys move over its text and scrollback (h j k l, w b e, 0 ^ $, g G, H M L, { }, ctrl+u/d/b/f), v or V select, / and ? search (n, N), y or Enter copy and leave, Escape or q leave. keys.json's `copy_mode` section binds keys while it's on.
+
+No arguments.
+
 ## `terminal.paste`
 
 Paste into the focused terminal (an image alone, into one on another machine, as a file there).

@@ -228,6 +228,81 @@ fn hyperlink_uri(r: &GhosttyGridRef) -> Option<String> {
     (res == GHOSTTY_SUCCESS && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
+/// A cell anywhere on the screen, scrollback included: rows count from the
+/// oldest line kept. Ordered as text reads (row, then column).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScreenPoint {
+    pub row: u32,
+    pub col: u16,
+}
+
+/// Where the viewport is in the screen: all rows, the viewport's first, its height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scroll {
+    pub rows: u32,
+    pub top: u32,
+    pub height: u32,
+}
+
+/// One screen row as text: each column's first character, `' '` for a blank
+/// cell, `None` for the second half of a wide character.
+pub struct Line {
+    pub cells: Vec<Option<char>>,
+    /// The terminal wrapped it: the next row continues it.
+    pub wraps: bool,
+}
+
+/// A screen cell that moves with the text (scrolling, pruned scrollback,
+/// reflow): libghostty's tracked grid reference, on the terminal that made it.
+pub struct Pin {
+    term: GhosttyTerminal,
+    tracked: GhosttyTrackedGridRef,
+}
+
+impl Pin {
+    /// Where it is now; None when the text it marked is gone.
+    pub fn get(&self, vt: &Vt) -> Option<ScreenPoint> {
+        assert!(self.term == vt.term, "a pin is read on the terminal that made it");
+        let mut p = GhosttyPointCoordinate::default();
+        (unsafe { ghostty_tracked_grid_ref_point(self.tracked, GHOSTTY_POINT_TAG_SCREEN, &mut p) } == GHOSTTY_SUCCESS)
+            .then_some(ScreenPoint { row: p.y, col: p.x })
+    }
+
+    /// Moves it; false when `to` isn't on the screen.
+    pub fn set(&mut self, vt: &Vt, to: ScreenPoint) -> bool {
+        assert!(self.term == vt.term, "a pin is moved on the terminal that made it");
+        unsafe { ghostty_tracked_grid_ref_set(self.tracked, vt.term, screen_point(to)) == GHOSTTY_SUCCESS }
+    }
+}
+
+impl Drop for Pin {
+    fn drop(&mut self) {
+        // Allowed after the terminal is freed too.
+        unsafe { ghostty_tracked_grid_ref_free(self.tracked) };
+    }
+}
+
+fn screen_point(p: ScreenPoint) -> GhosttyPoint {
+    let mut point = GhosttyPoint { tag: GHOSTTY_POINT_TAG_SCREEN, ..Default::default() };
+    point.value.coordinate = GhosttyPointCoordinate { x: p.col, y: p.row };
+    point
+}
+
+/// libghostty's search of a terminal (scrollback included), kept up with its
+/// output. Its matching is ASCII case-insensitive.
+pub struct Search {
+    term: GhosttyTerminal,
+    search: GhosttySearch,
+    needle: String,
+}
+
+impl Drop for Search {
+    fn drop(&mut self) {
+        // Allowed after the terminal is freed too.
+        unsafe { ghostty_search_free(self.search) };
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Select {
     Press,
@@ -258,7 +333,7 @@ unsafe extern "C" fn on_title(_t: GhosttyTerminal, userdata: *mut c_void) {
 const SYNC_OUTPUT: GhosttyMode = 2026;
 const BRACKETED_PASTE: GhosttyMode = 2004;
 const MAX_HOLD: Duration = Duration::from_millis(1000);
-const SCROLLBACK_MAX_LINES: usize = 10_000;
+pub(crate) const SCROLLBACK_MAX_LINES: usize = 10_000;
 // Bound memory per terminal; wide or heavily styled rows may hit this first.
 const SCROLLBACK_MAX_BYTES: usize = 10_000_000;
 /// Units per pixel for selection gestures (see `select`).
@@ -519,13 +594,18 @@ impl Vt {
 
     /// The selected text, if anything is selected.
     pub fn selection_text(&self) -> Option<String> {
+        self.format_selection(None)
+    }
+
+    /// A selection's text as plain lines (None: the terminal's own selection).
+    fn format_selection(&self, selection: Option<&GhosttySelection>) -> Option<String> {
         unsafe {
             let opts = GhosttyTerminalSelectionFormatOptions {
                 size: std::mem::size_of::<GhosttyTerminalSelectionFormatOptions>(),
                 emit: GHOSTTY_FORMATTER_FORMAT_PLAIN,
                 unwrap: true,
                 trim: true,
-                ..Default::default()
+                selection: selection.map_or(std::ptr::null(), |s| s as *const GhosttySelection),
             };
             let mut ptr: *mut u8 = std::ptr::null_mut();
             let mut len = 0usize;
@@ -565,14 +645,7 @@ impl Vt {
             p.y
         };
         let hovered = top + row as u32;
-        let wraps = |y: u32| unsafe {
-            let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
-            let mut line: GhosttyRow = Default::default();
-            let mut wrap = false;
-            ghostty_grid_ref_row(&r, &mut line) == GHOSTTY_SUCCESS
-                && ghostty_row_get(line, GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
-                && wrap
-        };
+        let wraps = |y: u32| self.row_wraps(y);
         // A URL longer than this many rows isn't one worth finding.
         const REACH: u32 = 32;
         let mut first = hovered;
@@ -650,6 +723,145 @@ impl Vt {
 
     pub fn clear_selection(&mut self) {
         unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, std::ptr::null()) };
+    }
+
+    /// The viewport's place in the whole screen.
+    pub fn scroll(&self) -> Scroll {
+        let mut bar = GhosttyTerminalScrollbar::default();
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &mut bar as *mut _ as *mut c_void) };
+        let clamp = |v: u64| u32::try_from(v).expect("fewer than 2^32 screen rows");
+        Scroll { rows: clamp(bar.total).max(1), top: clamp(bar.offset), height: clamp(bar.len).max(1) }
+    }
+
+    /// Scrolls so the viewport starts at screen row `top` (as far as it goes).
+    pub fn scroll_to_row(&mut self, top: u32) {
+        let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_ROW, ..Default::default() };
+        s.value.row = top as usize;
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+    }
+
+    /// A screen row as text, None past the last one.
+    pub fn line(&self, row: u32) -> Option<Line> {
+        let mut r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, row)?;
+        let mut cells = Vec::with_capacity(self.cols as usize);
+        for x in 0..self.cols {
+            r.x = x;
+            let mut cell: GhosttyCell = Default::default();
+            let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+            let mut cp = [0u32; 1];
+            let mut len = 0usize;
+            unsafe {
+                ghostty_grid_ref_cell(&r, &mut cell);
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void);
+                ghostty_grid_ref_graphemes(&r, cp.as_mut_ptr(), cp.len(), &mut len);
+            }
+            cells.push(match wide {
+                GHOSTTY_CELL_WIDE_SPACER_TAIL => None,
+                _ if len == 0 => Some(' '),
+                _ => Some(char::from_u32(cp[0]).unwrap_or(' ')),
+            });
+        }
+        Some(Line { cells, wraps: self.row_wraps(row) })
+    }
+
+    /// Whether the terminal wrapped screen row `y` into the next.
+    fn row_wraps(&self, y: u32) -> bool {
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
+        let mut line: GhosttyRow = Default::default();
+        let mut wrap = false;
+        unsafe {
+            ghostty_grid_ref_row(&r, &mut line) == GHOSTTY_SUCCESS
+                && ghostty_row_get(line, GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+                && wrap
+        }
+    }
+
+    /// Selects from one screen cell to another (either order), both included.
+    pub fn select_between(&mut self, a: ScreenPoint, b: ScreenPoint) {
+        let (Some(start), Some(end)) = (self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, a.col, a.row), self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, b.col, b.row)) else {
+            return self.clear_selection();
+        };
+        let sel = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), start, end, rectangle: false };
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel as *const _ as *const c_void) };
+    }
+
+    /// A pin at a screen cell, None when it isn't on the screen.
+    pub fn pin(&self, at: ScreenPoint) -> Option<Pin> {
+        let mut tracked = std::ptr::null_mut();
+        (unsafe { ghostty_terminal_grid_ref_track(self.term, screen_point(at), &mut tracked) } == GHOSTTY_SUCCESS && !tracked.is_null())
+            .then_some(Pin { term: self.term, tracked })
+    }
+
+    /// The program's cursor as a screen cell, shown or not.
+    pub fn cursor_on_screen(&self) -> ScreenPoint {
+        let (mut x, mut y) = (0u16, 0u16);
+        unsafe {
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_CURSOR_X, &mut x as *mut _ as *mut c_void);
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &mut y as *mut _ as *mut c_void);
+        }
+        // The cursor is in the active area: the screen's last rows.
+        ScreenPoint { row: self.scroll().rows.saturating_sub(self.rows as u32) + y as u32, col: x }
+    }
+
+    pub fn new_search(&self) -> Search {
+        let mut search = std::ptr::null_mut();
+        ok(unsafe { ghostty_search_new(std::ptr::null(), &mut search, self.term) }, "search_new");
+        Search { term: self.term, search, needle: String::new() }
+    }
+
+    /// Every match of `needle` on the screen, in reading order, as (first,
+    /// last) cells. A needle with a capital letter matches case exactly
+    /// (smart case, as in Herdr and vim); otherwise any case.
+    pub fn find_all(&mut self, search: &mut Search, needle: &str) -> Vec<(ScreenPoint, ScreenPoint)> {
+        self.search_matches(search, needle, GHOSTTY_SEARCH_DATA_MATCHES, true)
+    }
+
+    /// The matches `find_all` would give on the rows in view (some just
+    /// outside too), from what the search had read by now.
+    pub fn find_in_view(&mut self, search: &mut Search, needle: &str) -> Vec<(ScreenPoint, ScreenPoint)> {
+        self.search_matches(search, needle, GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, false)
+    }
+
+    fn search_matches(&mut self, search: &mut Search, needle: &str, data: GhosttySearchData, complete: bool) -> Vec<(ScreenPoint, ScreenPoint)> {
+        assert!(search.term == self.term, "a search runs on the terminal that made it");
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        unsafe {
+            if search.needle != needle {
+                let s = GhosttyString { ptr: needle.as_ptr(), len: needle.len() };
+                ok(ghostty_search_set(search.search, GHOSTTY_SEARCH_OPT_NEEDLE, &s as *const _ as *const c_void), "search needle");
+                search.needle = needle.to_owned();
+            }
+            ok(if complete { ghostty_search_run(search.search) } else { ghostty_search_feed(search.search) }, "search");
+            let mut buf = GhosttySelectionBuffer { ptr: std::ptr::null_mut(), cap: 0, len: 0 };
+            let mut found: Vec<GhosttySelection> = Vec::new();
+            loop {
+                match ghostty_search_get(search.search, data, &mut buf as *mut _ as *mut c_void) {
+                    GHOSTTY_SUCCESS => break,
+                    GHOSTTY_NO_VALUE => return Vec::new(),
+                    GHOSTTY_OUT_OF_SPACE => {
+                        found = vec![GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() }; buf.len];
+                        buf = GhosttySelectionBuffer { ptr: found.as_mut_ptr(), cap: found.len(), len: 0 };
+                    }
+                    r => panic!("search matches failed: {r}"),
+                }
+            }
+            found.truncate(buf.len);
+            let exact = needle.chars().any(char::is_uppercase);
+            let at = |r: &GhosttyGridRef| {
+                let mut p = GhosttyPointCoordinate::default();
+                (ghostty_terminal_point_from_grid_ref(self.term, r, GHOSTTY_POINT_TAG_SCREEN, &mut p) == GHOSTTY_SUCCESS).then_some(ScreenPoint { row: p.y, col: p.x })
+            };
+            let mut out: Vec<_> = found
+                .iter()
+                .filter(|m| !exact || self.format_selection(Some(m)).as_deref() == Some(needle))
+                .filter_map(|m| Some((at(&m.start)?, at(&m.end)?)))
+                .map(|(a, b)| (a.min(b), a.max(b)))
+                .collect();
+            out.sort();
+            out
+        }
     }
 
     pub fn write(&mut self, bytes: &[u8]) {

@@ -4,6 +4,7 @@
 mod bench;
 mod commands;
 mod control;
+mod copy_mode;
 mod core_bin;
 mod files;
 mod hc;

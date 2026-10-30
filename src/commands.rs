@@ -64,6 +64,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
     cmd("terminal.copy", &[], "Copy the focused terminal's selection."),
+    cmd("terminal.copy_mode", &[], "Copy mode in the focused terminal: vim keys move over its text and scrollback (h j k l, w b e, 0 ^ $, g G, H M L, { }, ctrl+u/d/b/f), v or V select, / and ? search (n, N), y or Enter copy and leave, Escape or q leave. keys.json's `copy_mode` section binds keys while it's on."),
     cmd("terminal.paste", &[], "Paste into the focused terminal (an image alone, into one on another machine, as a file there)."),
     cmd("terminal.paste_image", &[], "Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; otherwise Ctrl+V goes to the terminal."),
     cmd("agent.focus", &[req("terminal")], "Show an agent (sub-agents too)."),

@@ -2818,11 +2818,12 @@ impl AppWindow {
                     self.focused_pane = None;
                 }
             }
-            "terminal.copy" | "terminal.paste" | "terminal.paste_image" => {
+            "terminal.copy" | "terminal.copy_mode" | "terminal.paste" | "terminal.paste_image" => {
                 if let Some(t) = self.focused_terminal(window) {
                     t.view.update(cx, |v, cx| match name {
                         "terminal.paste" => v.paste(cx),
                         "terminal.paste_image" => v.paste_image(cx),
+                        "terminal.copy_mode" => v.enter_copy_mode(cx),
                         _ => v.copy(cx),
                     });
                 }
@@ -4534,7 +4535,7 @@ mod tests {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
             assert!(!super::needs_model_pane(name, &json!({"place": "tab"})), "{name}");
         }
-        for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
+        for name in ["pane.focus", "terminal.copy", "terminal.copy_mode", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
     }
