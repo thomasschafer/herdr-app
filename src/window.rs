@@ -1533,7 +1533,7 @@ impl AppWindow {
     /// reload), it goes to the top dialog, else the shown agent or focused pane,
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| self.overlay_focus(o));
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
@@ -1549,6 +1549,13 @@ impl AppWindow {
             None
         };
         dialog.or(shown).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
+    }
+
+    /// Where the keyboard goes in an overlay: its layout's first visible
+    /// terminal (a picker running in a terminal), else the overlay itself.
+    fn overlay_focus(&self, o: &Overlay) -> FocusHandle {
+        let first_term = o.layout.as_ref().and_then(|l| l.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Terminal { .. }))).map(|n| n.id.clone()));
+        first_term.and_then(|b| self.terms.get(&b)).map_or_else(|| o.focus.clone(), |t| t.focus.clone())
     }
 
     /// The terminal view a pane shows: the swapped-in one, else its own.
@@ -3481,7 +3488,6 @@ impl AppWindow {
             }
             self.copies.insert(slot.clone(), copy);
         }
-        let first_term = layout.as_ref().and_then(|l| l.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Terminal { .. }))).map(|n| n.id.clone()));
         let has_layout = layout.is_some();
         self.overlays.push(Overlay {
             id,
@@ -3510,9 +3516,9 @@ impl AppWindow {
         if has_layout {
             self.sync(window, cx);
             if kind.modal_keys()
-                && let Some(t) = first_term.and_then(|b| self.terms.get(&b))
+                && let Some(o) = self.overlays.last()
             {
-                t.focus.focus(window, cx);
+                self.overlay_focus(o).focus(window, cx);
             }
         } else {
             self.publish_shown_copies();
@@ -3649,6 +3655,8 @@ impl AppWindow {
                 "space": self.model.active_id(),
                 "tab": self.model.active_tab().map(|c| c.id.clone()),
                 "focused_pane": self.focused_pane,
+                // The terminal keys go to now (null: an overlay, a mod or the window has them).
+                "keyboard": self.terms.values().find(|t| t.focus.is_focused(window)).map(|t| t.address.clone()),
                 "layout": self.layout_name,
                 "agent": self.shown_agent(),
                 "floats": self.float_status(),
