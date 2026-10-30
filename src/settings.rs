@@ -390,7 +390,7 @@ pub struct Person {
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
-    #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
+    #[serde(alias = "macos_option_as_alt", skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
@@ -416,7 +416,7 @@ impl Appearance {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptionAsAlt {
     #[default]
@@ -430,6 +430,29 @@ pub enum OptionAsAlt {
 impl OptionAsAlt {
     fn is_auto(&self) -> bool {
         *self == Self::Auto
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionAsAlt {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Mode(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Bool(false) => Ok(Self::Off),
+            Raw::Bool(true) => Ok(Self::On),
+            Raw::Mode(mode) => match mode.as_str() {
+                "auto" => Ok(Self::Auto),
+                "off" => Ok(Self::Off),
+                "on" => Ok(Self::On),
+                "left" => Ok(Self::Left),
+                "right" => Ok(Self::Right),
+                _ => Err(serde::de::Error::custom(format!("option_as_alt must be auto, off, on, left, right, true or false, not {mode:?}"))),
+            },
+        }
     }
 }
 
@@ -864,6 +887,27 @@ mod tests {
             assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
         }
         assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "invalid"})).is_err());
+    }
+
+    #[test]
+    fn legacy_option_as_alt_settings_keep_their_behavior() {
+        for (value, expected, saved) in [
+            (serde_json::json!(false), OptionAsAlt::Off, "off"),
+            (serde_json::json!(true), OptionAsAlt::On, "on"),
+            (serde_json::json!("left"), OptionAsAlt::Left, "left"),
+            (serde_json::json!("right"), OptionAsAlt::Right, "right"),
+        ] {
+            let person: Person = serde_json::from_value(serde_json::json!({"macos_option_as_alt": value})).unwrap();
+            assert_eq!(Settings::compose(&person, &crate::layout::Look::default(), true).option_as_alt, expected);
+            let serialized = serde_json::to_value(&person).unwrap();
+            assert_eq!(serialized["option_as_alt"], saved);
+            assert!(serialized.get("macos_option_as_alt").is_none());
+            assert_eq!(serde_json::from_value::<Person>(serialized).unwrap(), person);
+        }
+        for bad in [serde_json::json!(1), serde_json::json!("both")] {
+            assert!(serde_json::from_value::<Person>(serde_json::json!({"macos_option_as_alt": bad})).is_err());
+        }
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "on", "macos_option_as_alt": false})).is_err());
     }
 
     #[test]

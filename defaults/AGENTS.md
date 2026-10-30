@@ -485,7 +485,8 @@ the build doesn't do.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
   ctrl+c, ctrl+d, ctrl+l, ctrl+r, ctrl+w, ctrl+a, ctrl+e, ctrl+u, ctrl+k,
   ctrl+z and ctrl+[ (Escape); ctrl+alt is AltGr on Windows; option+digits
-  and letters type characters on many Mac keyboards (`[`, `@`). Don't pick
+  and letters type characters on many Mac keyboards (`[`, `@`), unless
+  settings.json's `macos_option_as_alt` makes Option Alt. Don't pick
   these on your own. If the person asks for one, bind it and tell them what
   it takes from typing.
 - Windows AltGr and dead-key compositions type text in terminals. macOS
@@ -636,6 +637,9 @@ What's about the user, never a look:
   precedence as fonts.
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
+- `macos_option_as_alt` (Mac): compatibility alias for `option_as_alt`;
+  `true` means `"on"`, `false` means `"off"`, and `"left"`/`"right"` select
+  one Option key. Settings are saved using `option_as_alt`. Set only one key.
 - Updates: an installed app downloads them by itself and offers Restart and
   What changed. If the app crashes or is killed with a verified newer update
   waiting, the next launch installs it before opening a window. The first
