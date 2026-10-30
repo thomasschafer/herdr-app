@@ -142,7 +142,7 @@ impl Document {
 impl View {
     pub fn capture(model: &Model) -> Self {
         Self {
-            active: model.active.clone(),
+            active: model.active_id().map(str::to_owned),
             recent: model.recent.clone(),
             spaces: model.spaces.iter().map(|s| (s.id.clone(), s.active.clone())).collect(),
             tabs: model.tabs().map(|t| (t.id.clone(), TabView { focused: t.focused.clone(), before: t.before.clone(), zoomed: t.zoomed.clone(), settled: t.settled })).collect(),
@@ -208,7 +208,7 @@ impl View {
                 }
             }
         }
-        model.active = self.active.clone().filter(|id| model.space(id).is_some()).or_else(|| model.spaces.first().map(|s| s.id.clone()));
+        model.set_active(self.active.clone().filter(|id| model.space(id).is_some()).or_else(|| model.spaces.first().map(|s| s.id.clone())));
         model.recent = self.recent.clone();
         for (a, s) in &self.attention {
             model.agents.entry(a.clone()).or_insert_with(|| Agent { word: s.word.clone(), seen: s.seen, ..Default::default() });
@@ -269,17 +269,17 @@ mod tests {
         let mut m = model();
         Document::capture(&m, None).replace(&mut m, Some("mac"));
         m.tab_mut("mac/t").unwrap().zoomed = Some("mac/p".into());
-        m.active = Some("mac/s".into());
+        m.set_active(Some("mac/s".into()));
         let saved = View::capture(&m);
         let doc = Document::capture(&m, Some("mac"));
         m.spaces.retain(|s| s.machine.is_none());
-        m.active = Some("s".into());
+        m.set_active(Some("s".into()));
         m.tab_mut("t").unwrap().settled = Some(42);
         doc.replace(&mut m, Some("mac"));
         saved.apply_machine(&mut m, Some("mac"));
         assert_eq!(m.tab("t").unwrap().settled, Some(42));
         assert_eq!(m.tab("mac/t").unwrap().zoomed.as_deref(), Some("mac/p"));
-        assert_eq!(m.active.as_deref(), Some("mac/s"));
+        assert_eq!(m.active_id(), Some("mac/s"));
     }
     #[test]
     fn seen_attention_survives_a_screen_restart_but_not_a_new_word() {

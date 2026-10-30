@@ -38,6 +38,7 @@ const NAMED = [
   ["space.close", {}, "Space", "Close space", "workspace kill"],
   ["space.next", {}, "Space", "Next space", "workspace"],
   ["space.prev", {}, "Space", "Previous space", "workspace"],
+  ["space.last", {}, "Space", "Last space", "workspace back toggle previous recent"],
   ["layout.switch", {}, "Layout", "Next layout", "look switch"],
   ["layout.reset", {}, "Layout", "Reset layout", "new version default restore herdr's"],
   ["layout.clone", {}, "Layout", "Duplicate layout", "clone copy customize"],
