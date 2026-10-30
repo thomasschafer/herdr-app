@@ -559,7 +559,7 @@ From a shell:
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "look at the login bug"
 herdr-app do pane.split:right
 herdr-app ls          # spaces, their tabs and terminals (sub-agents under their parent)
-herdr-app status      # what's on screen: layout, focus, overlays, zoom, errors from files and mods
+herdr-app status      # what's on screen: layout, focus (keyboard: the terminal keys go to), overlays, zoom, errors from files and mods
 herdr-app commands    # every command and its arguments
 ```
 
