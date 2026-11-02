@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod bench;
+mod background;
 mod commands;
 mod control;
 mod copy_mode;

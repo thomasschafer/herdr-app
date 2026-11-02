@@ -1,6 +1,10 @@
 //! Real GPU readback, not a mocked image. Linux CI uses Vulkan software rendering.
 use gpui::{prelude::*, *};
 
+#[cfg(target_os = "macos")]
+#[path = "../src/background/macos.rs"]
+mod native_background;
+
 struct Scene;
 impl Render for Scene {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -87,6 +91,127 @@ fn check(window: &mut Window, cx: &mut App) {
     );
 }
 
+#[cfg(target_os = "macos")]
+struct TransparencyScene {
+    opacity: f32,
+}
+
+#[cfg(target_os = "macos")]
+impl Render for TransparencyScene {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let opacity = self.opacity;
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let rect = |x, y, width, height| {
+                    Bounds::new(bounds.origin + point(px(x), px(y)), size(px(width), px(height)))
+                };
+                window.with_background_opacity(opacity, |window| {
+                    window.paint_quad(fill(bounds, rgb(0xff0000)));
+                    window.with_background_opacity(opacity, |window| {
+                        window.paint_quad(fill(rect(4., 4., 40., 40.), rgb(0x00ff00)));
+                        window.paint_quad(fill(rect(8., 8., 20., 20.), rgb(0x0000ff)));
+                    });
+                    window.paint_quad(
+                        fill(rect(50., 4., 40., 40.), rgb(0x00ff00)).corner_radii(px(10.)),
+                    );
+                    window.with_background_opacity(1., |window| {
+                        window.paint_quad(fill(rect(96., 4., 16., 16.), rgb(0xffff00)));
+                    });
+                    window.paint_quad(fill(rect(96., 24., 16., 16.), rgb(0x0000ff)));
+                });
+                window.paint_quad(fill(rect(116., 4., 10., 10.), rgb(0xffffff)));
+            },
+        )
+        .size_full()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_transparency(root: AnyView, window: &mut Window, cx: &mut App) {
+    let root = root.downcast::<TransparencyScene>().unwrap();
+    // Reuse one window to catch stale render state after changing preferences.
+    for opacity in [0.8_f32, 0., 1., 0.8] {
+        root.update(cx, |scene, cx| {
+            scene.opacity = opacity;
+            cx.notify();
+        });
+        window.set_background_appearance(if opacity == 1. {
+            WindowBackgroundAppearance::Opaque
+        } else {
+            WindowBackgroundAppearance::Transparent
+        });
+        window.refresh();
+        let _ = window.draw(cx);
+        let image = window.render_to_image().expect("transparent GPU screenshot");
+        let scale = window.scale_factor();
+        let alpha = (opacity * 255.).round() as u8;
+        for (x, y, expected) in [
+            (2., 2., [alpha, 0, 0, alpha]),
+            (6., 6., [0, alpha, 0, alpha]),
+            (10., 10., [0, 0, alpha, alpha]),
+            (50., 4., [alpha, 0, 0, alpha]),
+            (70., 24., [0, alpha, 0, alpha]),
+            (98., 6., [255, 255, 0, 255]),
+            (98., 26., [0, 0, alpha, alpha]),
+            (118., 6., [255, 255, 255, 255]),
+        ] {
+            let actual = image.get_pixel((x * scale) as u32, (y * scale) as u32).0;
+            assert!(
+                actual.iter().zip(expected).all(|(got, want)| got.abs_diff(want) <= 1),
+                "opacity {opacity}, pixel ({x}, {y}) at scale {scale}: {actual:?}, expected {expected:?}"
+            );
+        }
+        if opacity > 0. {
+            let mut antialiased = 0;
+            for y in (4. * scale) as u32..(15. * scale) as u32 {
+                for x in (50. * scale) as u32..(61. * scale) as u32 {
+                    let [red, green, blue, actual_alpha] = image.get_pixel(x, y).0;
+                    if red > 0 && green > 0 {
+                        antialiased += 1;
+                        assert_eq!(blue, 0);
+                        assert!(actual_alpha.abs_diff(alpha) <= 1, "rounded edge alpha at ({x}, {y}): {actual_alpha}, expected {alpha}");
+                        assert!((red as u16 + green as u16).abs_diff(alpha as u16) <= 2,
+                            "rounded edge must blend premultiplied colors at ({x}, {y})");
+                    }
+                }
+            }
+            assert!(antialiased > 0, "rounded corner must include fractional coverage at scale {scale}");
+        }
+        assert_eq!(image, window.render_to_image().unwrap());
+    }
+    println!("transparent shot pixel test passed");
+}
+
+#[cfg(target_os = "macos")]
+fn check_native_transparency(root: AnyView, window: &mut Window, cx: &mut App) {
+    use objc2::{msg_send, runtime::AnyObject};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    for (opacity, blur, fullscreen, expected_opaque) in [
+        (0.8, 80, false, false),
+        (0.8, 0, false, false),
+        (0.8, 80, true, true),
+        (1., 80, false, true),
+        (0.8, 80, false, false),
+    ] {
+        native_background::apply(window, opacity, blur, fullscreen).expect("apply native transparency and numeric blur");
+        let handle = HasWindowHandle::window_handle(window).unwrap();
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            panic!("macOS test requires an AppKit window");
+        };
+        let actual_opaque: bool = unsafe {
+            let view = handle.ns_view.as_ptr() as *mut AnyObject;
+            let native: *mut AnyObject = msg_send![view, window];
+            msg_send![native, isOpaque]
+        };
+        assert_eq!(actual_opaque, expected_opaque,
+            "native opacity {opacity}, blur {blur}, fullscreen {fullscreen}");
+    }
+    check_transparency(root, window, cx);
+    native_background::apply(window, 1., 0, false).expect("reset native transparency and blur");
+}
+
 #[cfg(not(windows))]
 fn headless() {
     let mut cx = HeadlessAppContext::with_platform(
@@ -101,6 +226,15 @@ fn headless() {
             .unwrap();
         cx.update_window(window.into(), |_, window, cx| check(window, cx))
             .unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let window = cx
+            .open_window(size(px(131.), px(54.)), |_, cx| {
+                cx.new(|_| TransparencyScene { opacity: 0.8 })
+            })
+            .unwrap();
+        cx.update_window(window.into(), check_transparency).unwrap();
     }
 }
 
@@ -121,9 +255,28 @@ fn native() {
                 |_, cx| cx.new(|_| Scene),
             )
             .unwrap();
+        #[cfg(target_os = "macos")]
+        let transparent_window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(259.), px(107.)),
+                    ))),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    show: false,
+                    focus: false,
+                    titlebar: None,
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| TransparencyScene { opacity: 0.8 }),
+            )
+            .unwrap();
         cx.spawn(async move |cx| {
             cx.update_window(window.into(), |_, window, cx| check(window, cx))
                 .unwrap();
+            #[cfg(target_os = "macos")]
+            cx.update_window(transparent_window.into(), check_native_transparency).unwrap();
             cx.update(|cx| cx.quit());
         })
         .detach();

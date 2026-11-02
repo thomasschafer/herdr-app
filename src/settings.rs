@@ -399,6 +399,14 @@ pub struct Person {
     pub theme: Option<crate::layout::ThemeChoice>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+    /// Opacity of the window's backgrounds; text and icons stay opaque.
+    #[serde(deserialize_with = "read_background_opacity")]
+    pub background_opacity: f32,
+    /// Also apply background opacity to terminal cells with explicit colors.
+    pub background_opacity_cells: bool,
+    /// Background blur intensity (macOS); zero disables blur.
+    #[serde(deserialize_with = "read_background_blur")]
+    pub background_blur: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -460,6 +468,22 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn read_background_opacity<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    let opacity = f32::deserialize(d)?;
+    if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+        return Err(serde::de::Error::custom("background_opacity must be a finite number from 0 to 1"));
+    }
+    Ok(opacity)
+}
+
+fn read_background_blur<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let blur = u32::deserialize(d)?;
+    if blur > i32::MAX as u32 {
+        return Err(serde::de::Error::custom(format!("background_blur must be an integer from 0 to {}", i32::MAX)));
+    }
+    Ok(blur)
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -476,6 +500,9 @@ impl Default for Person {
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
+            background_opacity: 1.0,
+            background_opacity_cells: false,
+            background_blur: 0,
         }
     }
 }
@@ -507,6 +534,11 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
+    #[serde(deserialize_with = "read_background_opacity")]
+    pub background_opacity: f32,
+    pub background_opacity_cells: bool,
+    #[serde(deserialize_with = "read_background_blur")]
+    pub background_blur: u32,
     pub sounds: Sounds,
 }
 
@@ -547,6 +579,9 @@ impl Default for Settings {
             clipboard_write: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            background_opacity: 1.0,
+            background_opacity_cells: false,
+            background_blur: 0,
             sounds: Sounds::default(),
         }
     }
@@ -580,6 +615,9 @@ impl Settings {
             colors,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            background_opacity: person.background_opacity,
+            background_opacity_cells: person.background_opacity_cells,
+            background_blur: person.background_blur,
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
@@ -633,6 +671,12 @@ impl Settings {
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
+        }
+        if !self.background_opacity.is_finite() || !(0.0..=1.0).contains(&self.background_opacity) {
+            out.push("background_opacity must be a finite number from 0 to 1".into());
+        }
+        if self.background_blur > i32::MAX as u32 {
+            out.push(format!("background_blur must be an integer from 0 to {}", i32::MAX));
         }
         out
     }
@@ -952,6 +996,48 @@ mod tests {
         let clicks = crate::layout_sync::State { theme: Some(ThemeChoice::One("ink".into())), ..Default::default() };
         clicks.apply(&mut win98);
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
+    }
+
+    #[test]
+    fn background_preferences_default_to_opaque_and_survive_layout_changes() {
+        let person: Person = serde_json::from_str("{}").unwrap();
+        let defaults = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!((defaults.background_opacity, defaults.background_opacity_cells, defaults.background_blur), (1.0, false, 0));
+
+        let person: Person = serde_json::from_str(r#"{"background_opacity":0.8,"background_opacity_cells":true,"background_blur":80}"#).unwrap();
+        let text = serde_json::to_string(&person).unwrap();
+        assert_eq!(serde_json::from_str::<Person>(&text).unwrap(), person);
+        for layout in [include_str!("../defaults/layouts/main.json"), include_str!("../defaults/layouts/terminals.json"), include_str!("../defaults/layouts/win98.json")] {
+            let node: crate::layout::Node = serde_json::from_str(layout).unwrap();
+            let settings = Settings::compose(&person, &node.look, true);
+            assert_eq!((settings.background_opacity, settings.background_opacity_cells, settings.background_blur), (0.8, true, 80));
+            assert_eq!(settings.terminal_opacity, node.look.terminal_opacity.unwrap_or(1.0));
+        }
+    }
+
+    #[test]
+    fn invalid_background_preferences_are_rejected() {
+        for invalid in [
+            r#"{"background_opacity":-0.1}"#,
+            r#"{"background_opacity":1.1}"#,
+            r#"{"background_opacity":1e100}"#,
+            r#"{"background_opacity":null}"#,
+            r#"{"background_opacity_cells":1}"#,
+            r#"{"background_blur":-1}"#,
+            r#"{"background_blur":1.5}"#,
+            r#"{"background_blur":2147483648}"#,
+        ] {
+            assert!(serde_json::from_str::<Person>(invalid).is_err(), "{invalid}");
+            assert!(serde_json::from_str::<Settings>(invalid).is_err(), "{invalid}");
+        }
+        for opacity in [0.0, 1.0] {
+            let person: Person = serde_json::from_value(serde_json::json!({"background_opacity": opacity, "background_blur": i32::MAX})).unwrap();
+            assert_eq!(person.background_opacity, opacity as f32);
+            assert_eq!(person.background_blur, i32::MAX as u32);
+        }
+        for opacity in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(Settings { background_opacity: opacity, ..Settings::default() }.problems().iter().any(|s| s.contains("background_opacity")));
+        }
     }
 
     /// The guide agents read (written to the home folder) explains every

@@ -330,6 +330,8 @@ layout's look and a block can differ:
   fonts are in `mods/win98/fonts/`).
 - `terminal_opacity` (0..1): below 1, the background behind a terminal
   (a pane frame's, the layout's gradient) shows through its text.
+  This controls the terminal's paint over the layout; desktop transparency
+  uses settings.json's `background_opacity` instead.
 - Switching layouts switches the look. The theme menu changes the shown
   layout's root `theme`.
 - Today only the root's look applies; a block's own look is coming.
@@ -651,6 +653,15 @@ What's about the user, never a look:
   precedence as fonts.
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
+- `background_opacity` (macOS; 0..1, default 1): opacity of the window's backgrounds,
+  with text and icons kept opaque. This preference applies across layouts.
+- `background_opacity_cells` (macOS; default false): also apply background opacity to
+  explicit terminal cell backgrounds, including those painted by terminal apps.
+- `background_blur` (nonnegative integer, default 0): background blur intensity
+  on macOS when `background_opacity` is below 1; zero disables blur. For a
+  Ghostty-style translucent background, set `"background_opacity": 0.8`,
+  `"background_opacity_cells": true`, and `"background_blur": 80`.
+  Background transparency and blur are currently supported only on macOS.
 - `macos_option_as_alt` (Mac): compatibility alias for `option_as_alt`;
   `true` means `"on"`, `false` means `"off"`, and `"left"`/`"right"` select
   one Option key. Settings are saved using `option_as_alt`. Set only one key.

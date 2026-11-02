@@ -317,6 +317,7 @@ impl MetalRenderer {
             "shadow_vertex",
             "shadow_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            BlendMode::Standard,
         );
         let quads_pipeline_state = build_pipeline_state(
             &device,
@@ -325,6 +326,7 @@ impl MetalRenderer {
             "quad_vertex",
             "quad_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            if cfg!(target_os = "macos") { BlendMode::Background } else { BlendMode::Standard },
         );
         let underlines_pipeline_state = build_pipeline_state(
             &device,
@@ -333,6 +335,7 @@ impl MetalRenderer {
             "underline_vertex",
             "underline_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            BlendMode::Standard,
         );
         let monochrome_sprites_pipeline_state = build_pipeline_state(
             &device,
@@ -341,6 +344,7 @@ impl MetalRenderer {
             "monochrome_sprite_vertex",
             "monochrome_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            BlendMode::Standard,
         );
         let polychrome_sprites_pipeline_state = build_pipeline_state(
             &device,
@@ -349,6 +353,7 @@ impl MetalRenderer {
             "polychrome_sprite_vertex",
             "polychrome_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            BlendMode::Standard,
         );
         let surfaces_pipeline_state = build_pipeline_state(
             &device,
@@ -357,6 +362,7 @@ impl MetalRenderer {
             "surface_vertex",
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            BlendMode::Standard,
         );
 
         let command_queue = device.new_command_queue();
@@ -1306,6 +1312,11 @@ fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     RgbaImage::from_raw(width, height, pixels).context("failed to create RgbaImage from pixel data")
 }
 
+enum BlendMode {
+    Standard,
+    Background,
+}
+
 fn build_pipeline_state(
     device: &metal::DeviceRef,
     library: &metal::LibraryRef,
@@ -1313,6 +1324,7 @@ fn build_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
+    blend_mode: BlendMode,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1330,10 +1342,20 @@ fn build_pipeline_state(
     color_attachment.set_blending_enabled(true);
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
-    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
-    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
-    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    match blend_mode {
+        BlendMode::Standard => {
+            color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
+            color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+            color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+            color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+        }
+        BlendMode::Background => {
+            color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+            color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+            color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSource1Alpha);
+            color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSource1Alpha);
+        }
+    }
 
     device
         .new_render_pipeline_state(&descriptor)

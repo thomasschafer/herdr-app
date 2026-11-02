@@ -35,6 +35,10 @@ mod apple_build {
             no_includes: true,
             ..Default::default()
         };
+        config.defines.insert("target_os = macos".into(), "HERDR_MACOS".into());
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+            config.header = Some("#define HERDR_MACOS 1".into());
+        }
         config.export.include.extend([
             "Bounds".into(),
             "Corners".into(),

@@ -425,6 +425,7 @@ pub struct AppWindow {
     pointer: Point<Pixels>,
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
+    background_applied: Option<(f32, u32, bool)>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     focused_pane: Option<String>,
     /// The mod block holding the keyboard for directional navigation.
@@ -514,6 +515,7 @@ impl AppWindow {
             initial_view: std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok()),
             pointer: Point::default(),
             drag_from: None,
+            background_applied: None,
             titlebar_applied: None,
             focused_pane: None,
             focused_block: None,
@@ -4720,6 +4722,14 @@ impl Render for AppWindow {
         }
         self.tick_floats(window);
         self.apply_titlebar(window);
+        let look = settings::get();
+        let background = (look.background_opacity, look.background_blur, window.is_fullscreen());
+        if self.background_applied != Some(background) {
+            self.background_applied = Some(background);
+            if let Err(error) = crate::background::apply(window, background.0, background.1, background.2) {
+                self.report("settings", &format!("background: {error:#}"));
+            }
+        }
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
@@ -4737,7 +4747,6 @@ impl Render for AppWindow {
             .key_context(format!("Herdr layout = {}", self.layout_name).as_str())
             .size_full()
             .relative()
-            .bg(c("background"))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| this.run_action(a.id(), w, cx)))
@@ -4779,7 +4788,10 @@ impl Render for AppWindow {
                     this.flush_documents(false, window, cx);
                 }
             }))
-            .child(tree)
+            .child(crate::background::wrap(
+                div().size_full().relative().bg(c("background")).child(tree),
+                if window.is_fullscreen() { 1.0 } else { look.background_opacity },
+            ))
             .children(overlays)
             .children(tracker)
             .children(win_tracker)

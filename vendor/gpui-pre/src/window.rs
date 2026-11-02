@@ -1189,6 +1189,8 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    #[cfg(target_os = "macos")]
+    background_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2088,6 +2090,8 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            #[cfg(target_os = "macos")]
+            background_opacity: 1.0,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input_active: false,
@@ -4108,6 +4112,22 @@ impl Window {
         result
     }
 
+    /// Paint background quads with independent opacity and geometric coverage.
+    /// Text and images retain their own opacity; nested background fills do not
+    /// accumulate opacity where they completely cover earlier fills.
+    #[cfg(target_os = "macos")]
+    pub fn with_background_opacity<R>(
+        &mut self,
+        opacity: f32,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        assert!(opacity.is_finite() && (0.0..=1.0).contains(&opacity));
+        let previous = std::mem::replace(&mut self.background_opacity, opacity);
+        let result = f(self);
+        self.background_opacity = previous;
+        result
+    }
+
     pub(crate) fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
@@ -4591,6 +4611,8 @@ impl Window {
             bounds: snapped_bounds,
             content_mask: self.snapped_content_mask(),
             background: quad.background.opacity(opacity),
+            #[cfg(target_os = "macos")]
+            background_opacity: self.background_opacity,
             border_color: quad.border_color.opacity(opacity),
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,

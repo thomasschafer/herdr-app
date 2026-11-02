@@ -78,6 +78,7 @@ pub struct Cell {
     pub text: String,
     pub fg: Rgb,
     pub bg: Option<Rgb>,
+    pub selected: bool,
     pub bold: bool,
     pub italic: bool,
     pub faint: bool,
@@ -1650,6 +1651,7 @@ impl Vt {
                 text,
                 fg,
                 bg,
+                selected,
                 bold: style.bold,
                 italic: style.italic,
                 faint: style.faint,
@@ -1941,7 +1943,10 @@ mod tests {
     fn a_selection_shown_while_dragging_matches_the_rows_it_covers() {
         let mut vt = Vt::new(20, 6);
         vt.write(b"aaaa\r\nbbbb\r\ncccc\r\ndddd\r\neeee\r\n");
-        let highlighted = |f: &Frame| f.rows.iter().map(|r| r.iter().any(|c| c.bg == Some(theme().selection_bg))).collect::<Vec<_>>();
+        let highlighted = |f: &Frame| f.rows.iter().map(|r| r.iter().any(|c| {
+            if c.selected { assert_eq!(c.bg, Some(theme().selection_bg)); }
+            c.selected
+        })).collect::<Vec<_>>();
         vt.frame();
         vt.select(Select::Press, 0, 0, 1.0, 5.0, 10.0, 20.0);
         for row in 1..5 {

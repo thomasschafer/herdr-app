@@ -529,7 +529,7 @@ impl PrimitiveBatch {
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Quad {
@@ -538,9 +538,28 @@ pub struct Quad {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub background: Background,
+    #[cfg(target_os = "macos")]
+    pub background_opacity: f32,
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+}
+
+impl Default for Quad {
+    fn default() -> Self {
+        Self {
+            order: Default::default(),
+            border_style: Default::default(),
+            bounds: Default::default(),
+            content_mask: Default::default(),
+            background: Default::default(),
+            #[cfg(target_os = "macos")]
+            background_opacity: 1.0,
+            border_color: Default::default(),
+            corner_radii: Default::default(),
+            border_widths: Default::default(),
+        }
+    }
 }
 
 impl From<Quad> for Primitive {

@@ -97,6 +97,11 @@ those files or the generated guide. The app rewrites them on start.
   Discover required arguments with `herdr-app commands`.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
+- macOS window transparency lives in `settings.json`: `background_opacity` (0..1),
+  `background_opacity_cells` (also fade terminal cell backgrounds), and
+  `background_blur` (macOS blur intensity). For example, use `0.8`, `true`,
+  and `80`. Text stays opaque. These apply across layouts; `terminal_opacity`
+  separately controls the terminal background over its layout.
 - Make only the requested change. Don't touch unrelated mods or settings.
 - Use theme colors. Do not retain a mod's `cx` across callbacks; each
   callback receives its own. Native animations, not redraw timers, keep

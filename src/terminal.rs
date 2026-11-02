@@ -1110,7 +1110,7 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
 
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
-    Bg { from: usize, to: usize, color: Hsla },
+    Bg { from: usize, to: usize, color: Hsla, selected: bool },
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
@@ -1128,10 +1128,11 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
             continue;
         };
         let start = x;
-        while x < row.len() && row[x].bg == Some(bg) {
+        let selected = row[x].selected;
+        while x < row.len() && row[x].bg == Some(bg) && row[x].selected == selected {
             x += 1;
         }
-        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg) });
+        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg), selected });
     }
     let mut x = 0;
     while x < row.len() {
@@ -1271,7 +1272,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let copy = g.copy_view.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    crate::background::paint(window, fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)), false);
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -1323,9 +1324,13 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 paint_matches(copy.as_ref(), y, &at, &snap_box, cell, window);
             }
             match op {
-                RowOp::Bg { from, to, color } => {
+                RowOp::Bg { from, to, color, selected } => {
                     let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
-                    window.paint_quad(fill(snap_box(b), *color));
+                    if *selected {
+                        window.paint_quad(fill(snap_box(b), *color));
+                    } else {
+                        crate::background::paint(window, fill(snap_box(b), *color), true);
+                    }
                 }
                 RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x, y), cell), *color, window),
                 RowOp::Icon { x, offset, font, glyph, size, color } => {
@@ -1615,7 +1620,7 @@ impl Render for TerminalView {
                         }
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        crate::background::with_opacity(window, 1.0, |window| paint_grid(bounds, &grid_paint, focused, window, cx));
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -1741,6 +1746,23 @@ mod tests {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
             gpui::div()
         }
+    }
+
+    #[gpui::test]
+    fn selected_backgrounds_stay_separate_from_matching_program_colors(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let color = crate::vt::Rgb(100, 120, 140);
+            let row = [false, false, true, true, false].map(|selected| crate::vt::Cell {
+                bg: Some(color), selected, ..Default::default()
+            });
+            let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), window);
+            let runs: Vec<_> = ops.iter().map(|op| match op {
+                super::RowOp::Bg { from, to, selected, .. } => (*from, *to, *selected),
+                _ => panic!("blank cells should only paint backgrounds"),
+            }).collect();
+            assert_eq!(runs, [(0, 2, false), (2, 4, true), (4, 5, false)]);
+        }).unwrap();
     }
 
     #[gpui::test]

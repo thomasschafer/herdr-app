@@ -222,6 +222,8 @@ fn solid_quad(
         bounds,
         content_mask: *content_mask,
         background: color.into(),
+        #[cfg(target_os = "macos")]
+        background_opacity: 1.0,
         border_color: transparent_black(),
         corner_radii: Corners::default(),
         border_widths: Edges::default(),

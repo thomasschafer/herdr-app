@@ -538,6 +538,8 @@ pub struct Quad {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub background: Background,
+    #[cfg(target_os = "macos")]
+    pub background_opacity: f32,
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,

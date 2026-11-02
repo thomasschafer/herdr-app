@@ -97,9 +97,7 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
-fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
-                              constant Quad *quads
-                              [[buffer(QuadInputIndex_Quads)]]) {
+float4 quad_color(QuadFragmentInput input, constant Quad *quads) {
   Quad quad = quads[input.quad_id];
   float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
@@ -395,6 +393,31 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
 
   return color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf));
 }
+
+#ifdef HERDR_MACOS
+struct QuadFragmentOutput {
+  float4 color [[color(0), index(0)]];
+  float4 coverage [[color(0), index(1)]];
+};
+
+fragment QuadFragmentOutput quad_fragment(QuadFragmentInput input [[stage_in]],
+                                          constant Quad *quads
+                                          [[buffer(QuadInputIndex_Quads)]]) {
+  float4 color = quad_color(input, quads);
+  float alpha = color.a * quads[input.quad_id].background_opacity;
+  // Backgrounds replace covered paint while retaining their requested opacity,
+  // so overlapping window, layout and pane fills do not become opaque.
+  return QuadFragmentOutput{
+      float4(color.rgb * alpha, alpha),
+      float4(0.0, 0.0, 0.0, color.a)};
+}
+#else
+fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
+                              constant Quad *quads
+                              [[buffer(QuadInputIndex_Quads)]]) {
+  return quad_color(input, quads);
+}
+#endif
 
 // Returns the dash velocity of a corner given the dash velocity of the two
 // sides, by returning the slower velocity (larger dashes).
