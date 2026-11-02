@@ -907,10 +907,10 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
             let shaped_x = glyph.position.x;
 
             if shaped_x > last_base_shaped_x + force_width * 0.5 {
-                let forced_x = glyph_pos * force_width;
-                if (shaped_x - forced_x).abs() > px(1.) {
-                    glyph.position.x = forced_x;
-                }
+                // HERDR: always on the grid. Snapping only glyphs that drifted
+                // over 1px left the first few of a run between cells when the
+                // cell is wider than the font's advance.
+                glyph.position.x = glyph_pos * force_width;
                 last_base_shaped_x = shaped_x;
                 last_base_actual_x = glyph.position.x;
                 glyph_pos += 1;
@@ -1162,29 +1162,25 @@ mod tests {
     #[test]
     fn test_force_width_corrects_drifted_base_positions() {
         let cell_width = px(8.);
-        // Font metrics don't perfectly match cell grid — glyphs drift >1px from cell boundary
-        let mut layout = make_layout(vec![
-            glyph_at(0.5, 0),  // within 1px tolerance, kept as-is
-            glyph_at(10.2, 1), // >1px off from 8.0, corrected
-            glyph_at(19.8, 2), // >1px off from 16.0, corrected
-        ]);
+        // Font metrics don't perfectly match cell grid — every base glyph moves onto it,
+        // however little it drifted.
+        let mut layout = make_layout(vec![glyph_at(0.5, 0), glyph_at(7.2, 1), glyph_at(14.4, 2), glyph_at(19.8, 3)]);
 
         apply_force_width_to_layout(&mut layout, cell_width);
 
         let positions = glyph_x_positions(&layout);
-        assert_eq!(positions, vec![0.5, 8., 16.]);
+        assert_eq!(positions, vec![0., 8., 16., 24.]);
     }
 
     #[test]
-    fn test_force_width_combining_mark_after_within_tolerance_base() {
+    fn test_force_width_combining_mark_follows_snapped_base() {
         let cell_width = px(8.);
-        // Base glyph is within 1px of grid so it keeps its shaped position.
-        // The combining mark must align to the base's actual position, not the grid slot.
-        let mut layout = make_layout(vec![glyph_at(0.5, 0), glyph_at(0.5, 3)]);
+        // The combining mark keeps its offset from the base, wherever the base was moved.
+        let mut layout = make_layout(vec![glyph_at(0.5, 0), glyph_at(0.75, 3)]);
 
         apply_force_width_to_layout(&mut layout, cell_width);
 
         let positions = glyph_x_positions(&layout);
-        assert_eq!(positions, vec![0.5, 0.5]);
+        assert_eq!(positions, vec![0., 0.25]);
     }
 }

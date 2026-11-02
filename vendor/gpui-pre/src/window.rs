@@ -1191,6 +1191,8 @@ pub struct Window {
     pub(crate) element_opacity: f32,
     #[cfg(target_os = "macos")]
     background_opacity: f32,
+    // HERDR: a fixed font smoothing strength instead of one from the text's color.
+    glyph_dilation: Option<u8>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2092,6 +2094,7 @@ impl Window {
             element_opacity: 1.0,
             #[cfg(target_os = "macos")]
             background_opacity: 1.0,
+            glyph_dilation: None,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input_active: false,
@@ -4128,6 +4131,16 @@ impl Window {
         result
     }
 
+    /// Paint glyphs with this font smoothing (dilation) level, 0..=4, instead
+    /// of the one the platform picks from each glyph's color.
+    pub fn with_glyph_dilation<R>(&mut self, dilation: u8, f: impl FnOnce(&mut Self) -> R) -> R {
+        assert!(dilation <= 4, "glyph dilation {dilation} is outside 0..=4");
+        let previous = self.glyph_dilation.replace(dilation);
+        let result = f(self);
+        self.glyph_dilation = previous;
+        result
+    }
+
     pub(crate) fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
@@ -4765,7 +4778,9 @@ impl Window {
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
-        let dilation = self.text_system().glyph_dilation_for_color(color);
+        let dilation = self
+            .glyph_dilation
+            .unwrap_or_else(|| self.text_system().glyph_dilation_for_color(color));
         let params = RenderGlyphParams {
             font_id,
             glyph_id,

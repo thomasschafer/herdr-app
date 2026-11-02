@@ -48,6 +48,8 @@ struct Grid {
     core: Arc<Core>,
     channel: Option<u32>,
     cell: Size<Pixels>,
+    /// Where a cell's text line is painted from, relative to the cell.
+    text_offset: Point<Pixels>,
     /// The window's scale factor, from the last prepaint. Programs see cells,
     /// images and pixel mouse reports in device pixels, as in Ghostty.
     scale: f32,
@@ -195,6 +197,7 @@ impl TerminalView {
                 core: core.clone(),
                 channel: None,
                 cell: size(px(9.0), px(18.0)),
+                text_offset: Point::default(),
                 scale: 1.0,
                 vt_cell: (9, 18),
                 told_display: None,
@@ -1085,27 +1088,90 @@ fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     Some((code, shifted, Some(base)))
 }
 
+/// Device pixels added to each cell's [width, height], as Ghostty's
+/// `adjust-cell-width` and `adjust-cell-height` (absolute values).
+const ADJUST_CELL: [i32; 2] = [1, 1];
+
+/// Ghostty's `font-thicken`: CoreText's font smoothing at full strength,
+/// whatever the text's color. macOS only, as in Ghostty.
+const FONT_THICKEN: bool = true;
+
 fn cell_font(bold: bool, italic: bool) -> Font {
     let mut f = font(crate::settings::terminal_font());
     // Ligatures merge several cells into one glyph, which breaks the grid.
     f.features = FontFeatures(std::sync::Arc::new(vec![("calt".into(), 0), ("liga".into(), 0), ("dlig".into(), 0)]));
-    f.weight = if bold { FontWeight::BOLD } else { FontWeight::MEDIUM };
+    f.weight = if bold { FontWeight::BOLD } else { FontWeight::NORMAL };
     f.style = if italic { FontStyle::Italic } else { FontStyle::Normal };
     f
 }
 
-pub fn cell_size(window: &Window) -> Size<Pixels> {
+/// A font's measurements in device pixels, all positive.
+#[derive(Clone, Copy, Debug)]
+struct FaceMetrics {
+    advance: f32,
+    ascent: f32,
+    descent: f32,
+    line_gap: f32,
+}
+
+/// A grid cell laid out as Ghostty lays it out (`font/Metrics.zig` and the
+/// glyph centering in `font/face/coretext.zig`), in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GhosttyCell {
+    width: f32,
+    height: f32,
+    /// From the cell's top.
+    baseline: f32,
+    /// How far right of the cell's left edge a glyph's origin goes, so the
+    /// font's advance sits centered in the cell.
+    glyph_x: f32,
+}
+
+fn ghostty_cell(face: FaceMetrics, adjust: [i32; 2]) -> GhosttyCell {
+    let face_height = face.ascent + face.descent + face.line_gap;
+    let rounded_height = face_height.round();
+    let width = (face.advance.round() + adjust[0] as f32).max(1.0);
+    let height = (rounded_height + adjust[1] as f32).max(1.0);
+    // Ghostty measures the baseline from the cell's bottom, centering the face
+    // in the rounded height, half the line gap below it.
+    let face_baseline = face.line_gap / 2.0 + face.descent;
+    let mut baseline = (face_baseline - (rounded_height - face_height) / 2.0).round();
+    // An adjusted height is split over the top and bottom; an odd pixel goes
+    // to the edge the face sits further from.
+    let half = (height - rounded_height) / 2.0;
+    let off_center = (baseline - face_baseline) - (rounded_height - face_height) / 2.0;
+    baseline += if off_center > 0.0 { half.floor() } else { half.ceil() };
+    let dx = (width - face.advance) / 2.0;
+    // In a cell narrower than the advance only the fraction moves the glyph.
+    let glyph_x = if dx < 0.0 { dx - dx.trunc() } else { dx };
+    GhosttyCell { width, height, baseline: height - baseline, glyph_x }
+}
+
+/// The terminal grid's cell, and where to paint a cell's text line from
+/// (relative to the cell) so it lands as Ghostty draws it.
+pub struct CellMetrics {
+    pub size: Size<Pixels>,
+    pub text_offset: Point<Pixels>,
+}
+
+pub fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
-    let f = cell_font(false, false);
-    let id = ts.resolve_font(&f);
+    let id = ts.resolve_font(&cell_font(false, false));
     let fs = px(crate::settings::font_size());
-    let w = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
-    let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
-    // The width stays the font's own advance: GPUI only moves a glyph onto the
-    // grid once it drifts over 1px, so a rounded width made text wobble.
-    // Boxes snap their edges instead (`snap_box`).
     let scale = window.scale_factor();
-    size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+    let advance = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
+    let (ascent, descent) = (f32::from(ts.ascent(id, fs)), f32::from(ts.descent(id, fs)).abs());
+    let face = FaceMetrics { advance: f32::from(advance) * scale, ascent: ascent * scale, descent: descent * scale, line_gap: f32::from(ts.line_gap(id, fs)).max(0.0) * scale };
+    let cell = ghostty_cell(face, ADJUST_CELL);
+    let height = cell.height / scale;
+    // `ShapedLine::paint` centers ascent + descent in the line height.
+    let gpui_baseline = (height - ascent - descent) / 2.0 + ascent;
+    CellMetrics { size: size(px(cell.width / scale), px(height)), text_offset: point(px(cell.glyph_x / scale), px(cell.baseline / scale - gpui_baseline)) }
+}
+
+/// Paints with Ghostty's `font-thicken` where it applies.
+fn with_thicken<R>(window: &mut Window, f: impl FnOnce(&mut Window) -> R) -> R {
+    if cfg!(target_os = "macos") && FONT_THICKEN { window.with_glyph_dilation(4, f) } else { f(window) }
 }
 
 /// One piece of a row's drawing, in cells from the row's start.
@@ -1231,7 +1297,7 @@ fn paint_matches(
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
-    let cell = g.cell;
+    let (cell, text_offset) = (g.cell, g.text_offset);
     let (pad_x, pad_y) = pad();
     // Rows rarely fill the height exactly: split what's left above and below.
     let spare = (f32::from(bounds.size.height) - 2.0 * pad_y - f32::from(cell.height) * g.vt.rows as f32).max(0.0);
@@ -1337,7 +1403,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                     let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
                 }
                 RowOp::Text { x, line } => {
-                    let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
+                    let _ = line.paint(at(*x, y) + text_offset, cell.height, TextAlign::Left, None, window, cx);
                 }
             }
         }
@@ -1375,7 +1441,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 strikethrough: None,
             };
             let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
-            let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+            let _ = line.paint(p + text_offset, cell.height, TextAlign::Left, None, window, cx);
         }
     };
     // In copy mode its cursor is the one shown, in the theme's cursor color.
@@ -1414,7 +1480,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         };
         let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], None);
         window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
-        let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+        let _ = line.paint(p + text_offset, cell.height, TextAlign::Left, None, window, cx);
     }
     grid.borrow_mut().cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
 }
@@ -1494,7 +1560,7 @@ impl Render for TerminalView {
                 g.core.focus(ch, focused);
             }
         }
-        let cell = cell_size(window);
+        let CellMetrics { size: cell, text_offset } = cell_metrics(window);
         // Copy mode ends when the text its cursor was on is gone (a reset).
         let lost = {
             let g = &mut *self.grid.borrow_mut();
@@ -1601,6 +1667,7 @@ impl Render for TerminalView {
                     move |bounds, window, _cx| {
                         let mut g = grid.borrow_mut();
                         g.cell = cell;
+                        g.text_offset = text_offset;
                         g.scale = window.scale_factor();
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
@@ -1620,7 +1687,7 @@ impl Render for TerminalView {
                         }
                     },
                     move |bounds, _, window, cx| {
-                        crate::background::with_opacity(window, 1.0, |window| paint_grid(bounds, &grid_paint, focused, window, cx));
+                        crate::background::with_opacity(window, 1.0, |window| with_thicken(window, |window| paint_grid(bounds, &grid_paint, focused, window, cx)));
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -2228,6 +2295,36 @@ mod tests {
             vt.write(output);
             assert_eq!(key_bytes(&mut vt, &press("shift-enter", None)).as_deref(), Some(expected), "output={output:?}");
         }
+    }
+
+    /// JetBrains Mono at 12pt: 1000 units per em, advance 600, ascent 1020,
+    /// descent 300, no line gap.
+    fn jetbrains_mono(scale: f32) -> super::FaceMetrics {
+        let unit = 12.0 * scale / 1000.0;
+        super::FaceMetrics { advance: 600.0 * unit, ascent: 1020.0 * unit, descent: 300.0 * unit, line_gap: 0.0 }
+    }
+
+    #[test]
+    fn cells_measure_as_ghostty_does() {
+        use super::{GhosttyCell, ghostty_cell};
+        let close = |a: GhosttyCell, b: GhosttyCell| {
+            let pairs = [(a.width, b.width), (a.height, b.height), (a.baseline, b.baseline), (a.glyph_x, b.glyph_x)];
+            assert!(pairs.iter().all(|(x, y)| (x - y).abs() < 1e-4), "{a:?} != {b:?}");
+        };
+        // Retina: advance 14.4 and height 31.68 round to 14 x 32, and the
+        // glyph moves left to center the wider advance.
+        close(ghostty_cell(jetbrains_mono(2.0), [0, 0]), GhosttyCell { width: 14.0, height: 32.0, baseline: 25.0, glyph_x: -0.2 });
+        // Where the face sits below center, the odd added row goes under the baseline.
+        close(ghostty_cell(jetbrains_mono(2.0), [1, 1]), GhosttyCell { width: 15.0, height: 33.0, baseline: 25.0, glyph_x: 0.3 });
+        // At 1x it sits above center, so the added row goes on top.
+        close(ghostty_cell(jetbrains_mono(1.0), [1, 1]), GhosttyCell { width: 8.0, height: 17.0, baseline: 13.0, glyph_x: 0.4 });
+        close(ghostty_cell(jetbrains_mono(2.0), [2, -2]), GhosttyCell { width: 16.0, height: 30.0, baseline: 24.0, glyph_x: 0.8 });
+        // A narrower cell keeps only the fraction of the shift.
+        close(ghostty_cell(jetbrains_mono(2.0), [-2, 0]), GhosttyCell { width: 12.0, height: 32.0, baseline: 25.0, glyph_x: -0.2 });
+        // A line gap is half above, half below.
+        let gapped = super::FaceMetrics { line_gap: 4.0, ..jetbrains_mono(2.0) };
+        close(ghostty_cell(gapped, [0, 0]), GhosttyCell { width: 14.0, height: 36.0, baseline: 27.0, glyph_x: -0.2 });
+        assert_eq!(ghostty_cell(jetbrains_mono(1.0), [-100, -100]).width, 1.0);
     }
 
     #[test]
