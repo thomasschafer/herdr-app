@@ -34,9 +34,8 @@ fn main() {
     let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
     let status = Command::new(&zig)
         .current_dir(&src)
-        // Only the static archive is linked. Without this, Zig also builds an
-        // xcframework on macOS whenever xcodebuild is on PATH, which fails the
-        // build when Xcode itself is broken.
+        // Only the static library is linked. Ghostty builds the xcframework whenever it finds
+        // xcodebuild, and with only the Command Line Tools /usr/bin/xcodebuild exists but fails.
         .args(["build", "-Demit-lib-vt", "-Demit-xcframework=false", "-Doptimize=ReleaseFast"])
         .arg(format!("-Dtarget={}", zig_target(&std::env::var("TARGET").unwrap())))
         .arg("--prefix")
