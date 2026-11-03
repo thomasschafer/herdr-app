@@ -2,3 +2,5 @@
 /dist
 /.brain
 /AGENTS.local.md
+/defaults/mods/*/gpui-kit.d.ts
+/defaults/mods/*/jsconfig.json
