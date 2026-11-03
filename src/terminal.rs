@@ -460,6 +460,16 @@ impl TerminalView {
         }
     }
 
+    /// A line typed in as a person types it (not a paste), then Enter. Fails
+    /// rather than dropping the line when the terminal's stream isn't open yet.
+    pub fn type_line(&self, line: &str) -> Result<(), String> {
+        if self.grid.borrow().channel.is_none() {
+            return Err(format!("terminal {:?} isn't attached yet: retry", self.address));
+        }
+        self.send(&[line.as_bytes(), b"\r"].concat());
+        Ok(())
+    }
+
     /// Files dropped on the terminal: their paths typed in, quoted, as a paste
     /// (agents read a dropped image that way). A terminal on another machine
     /// gets each file copied there first (`hc put`), and its path there.

@@ -60,7 +60,7 @@ Move a space to a position (1 = first).
 
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task), and `type`, a line typed into its terminal as it starts, then Enter (a shell runs it once ready, keeps it in its history and stays when it ends); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new).
+Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task), and `type`, a line typed into its terminal as it starts, then Enter (a shell runs it once ready, keeps it in its history and stays when it ends); argv runs in your shell, which stays when it exits, unless `stay` is false: then argv runs as given, without a shell, and its tab closes when it exits; or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new).
 
 | Argument | Required |
 |---|---|
@@ -70,6 +70,7 @@ Make a tab in a space (default: the selected one; name default: none, so it's ca
 | `argv` | no |
 | `task` | no |
 | `type` | no |
+| `stay` | no |
 | `mod` | no |
 | `props` | no |
 
@@ -176,6 +177,15 @@ End a terminal and its sub-agents.
 | Argument | Required |
 |---|---|
 | `terminal` | yes |
+
+## `terminal.type`
+
+Type a line into a terminal the window shows, then Enter, as a person types it (not a paste, so an editor in normal mode runs it as keys). Plain text only.
+
+| Argument | Required |
+|---|---|
+| `terminal` | yes |
+| `line` | yes |
 
 ## `space.select`
 

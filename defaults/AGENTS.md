@@ -528,9 +528,12 @@ The main ones:
   runs it as soon as it's ready, keeps it in its history and stays when it ends
   (`pane.split {direction: "right", type: "hx ."}`). Plain text under 1024 bytes;
   a newline or other control character fails the command.
-- Tabs: `tab.new {name?, space?, folder?, argv?, task?, type?}` (argv: an
+- Tabs: `tab.new {name?, space?, folder?, argv?, task?, type?, stay?}` (argv: an
   agent to run, task: its first message). Agents run in your interactive
-  shell (including fish), which stays open after the agent exits. A terminal
+  shell (including fish), which stays open after the agent exits. With
+  `stay: false`, argv runs as given, without a shell or its profile, and the
+  tab closes when it exits (a tool opened from an editor:
+  `{argv: ["lazygit"], stay: false}`). A terminal
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell
@@ -558,6 +561,10 @@ The main ones:
   model pane; composition edits belong to the mod (edit its layout instead).
 - Terminals: `terminal.open {argv?, folder?, place?, name?, type?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
+  `terminal.type {terminal, line}` (types plain text into a terminal the window
+  shows, then Enter, as a person types it rather than as a paste: an editor in
+  normal mode reads it as keys, so `{terminal: "t7", line: ":open src/main.rs"}`
+  opens a file in Helix or Vim),
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.copy`,

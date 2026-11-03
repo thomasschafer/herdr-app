@@ -2324,12 +2324,29 @@ impl AppWindow {
         vec!["powershell.exe".into(), "-NoLogo".into(), "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(cmd)]
     }
 
-    /// An agent with its first message, in a shell that stays when the agent exits
-    /// (on another machine: that machine's shell).
-    fn agent_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>) -> Option<Vec<String>> {
+    /// A program and its first message (task) as its last argument; none without a program.
+    fn with_task(argv: Option<Vec<String>>, task: Option<&str>) -> Option<Vec<String>> {
         let task = task.map(str::trim).filter(|t| !t.is_empty());
         argv.filter(|a| !a.is_empty()).map(|mut cmd| {
             cmd.extend(task.map(str::to_owned));
+            cmd
+        })
+    }
+
+    /// What a new tab's terminal runs. With `stay`, an agent in a shell that
+    /// stays (`agent_argv`), or the machine's shell. Without, the program as
+    /// given, so its terminal and pane end with it.
+    fn tab_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>, stay: bool) -> Result<Option<Vec<String>>, String> {
+        if stay {
+            return Ok(Self::agent_argv(argv.clone(), task, on).or(argv));
+        }
+        Self::with_task(argv, task).map(Some).ok_or_else(|| "stay: false needs argv, the program to run".to_owned())
+    }
+
+    /// An agent with its first message, in a shell that stays when the agent exits
+    /// (on another machine: that machine's shell).
+    fn agent_argv(argv: Option<Vec<String>>, task: Option<&str>, on: Option<&str>) -> Option<Vec<String>> {
+        Self::with_task(argv, task).map(|cmd| {
             if on.is_some() {
                 return crate::remote_shell::launch(cmd);
             }
@@ -2345,7 +2362,8 @@ impl AppWindow {
 
     /// A space with its first tab and terminal, shown at once.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
-    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, typed: Option<&str>) -> Result<Value, String> {
+    /// `stay`: see `tab_argv`.
+    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, typed: Option<&str>, stay: bool) -> Result<Value, String> {
         let on = machine.as_deref();
         // The focused pane's folder only means something on its own machine.
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
@@ -2353,7 +2371,7 @@ impl AppWindow {
             .and_then(|a| self.cwds.get(&a).cloned());
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on, typed)?;
+        let addr = self.spawn(Self::tab_argv(argv, task, on, stay)?, folder.clone(), &space, &ctx, on, typed)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2362,8 +2380,8 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
-    /// A tab in a space (default: the shown one), shown at once.
-    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, typed: Option<&str>) -> Result<Value, String> {
+    /// A tab in a space (default: the shown one), shown at once. `stay`: see `tab_argv`.
+    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, typed: Option<&str>, stay: bool) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
@@ -2371,7 +2389,7 @@ impl AppWindow {
         let folder = folder.unwrap_or_else(|| self.folder_for(&space));
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref(), typed)?;
+        let addr = self.spawn(Self::tab_argv(argv, task, on.as_deref(), stay)?, folder, &space, &ctx, on.as_deref(), typed)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.set_active(Some(space.clone()));
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -2630,6 +2648,29 @@ impl AppWindow {
         }
     }
 
+    /// `line` for terminal.type: plain text, so it can't press keys of its own.
+    fn typed_line(args: &Value) -> Result<&str, String> {
+        match args.get("line") {
+            None | Some(Value::Null) => Err("terminal.type needs line, the text to type".into()),
+            Some(Value::String(line)) if line.is_empty() => Err("terminal.type: line is empty".into()),
+            Some(Value::String(line)) if line.chars().any(char::is_control) => {
+                Err(format!("terminal.type: line {line:?} has a control character: only plain text can be typed"))
+            }
+            Some(Value::String(line)) => Ok(line),
+            Some(other) => Err(format!("line is a line of text to type, not {other}")),
+        }
+    }
+
+    /// `stay`, whether a new tab's program runs in a shell that stays when it
+    /// ends: true unless false.
+    fn stay(args: &Value) -> Result<bool, String> {
+        match args.get("stay") {
+            None | Some(Value::Null) => Ok(true),
+            Some(Value::Bool(stay)) => Ok(*stay),
+            Some(other) => Err(format!("stay is true or false, not {other}")),
+        }
+    }
+
     fn arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
         args.get(k).and_then(Value::as_str)
     }
@@ -2766,7 +2807,7 @@ impl AppWindow {
             // ---- spaces
             "space.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = Self::typed(a).and_then(|typed| self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), new_space_machine(a, person, &self.model), typed));
+                let r = Self::typed(a).and_then(|typed| self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), new_space_machine(a, person, &self.model), typed, true));
                 self.answer(r);
             }
             "space.close" => {
@@ -2819,14 +2860,15 @@ impl AppWindow {
             // ---- tabs
             "tab.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = match (Self::owned(a, "mod"), Self::typed(a)) {
-                    (_, Err(e)) => Err(e),
-                    (Some(_), Ok(Some(_))) => Err("tab.new: a mod has no terminal to type into: give mod or type, not both".into()),
-                    (Some(m), Ok(None)) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
-                    (None, Ok(typed)) if person && a.get("space").is_none() && self.model.active_space().is_none() => {
-                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, typed)
+                let r = match (Self::owned(a, "mod"), Self::typed(a), Self::stay(a)) {
+                    (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+                    (Some(_), Ok(Some(_)), _) => Err("tab.new: a mod has no terminal to type into: give mod or type, not both".into()),
+                    (Some(_), _, Ok(false)) => Err("tab.new: a mod has no program to end with: give mod or stay, not both".into()),
+                    (Some(m), Ok(None), Ok(true)) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
+                    (None, Ok(typed), Ok(stay)) if person && a.get("space").is_none() && self.model.active_space().is_none() => {
+                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, typed, stay)
                     }
-                    (None, Ok(typed)) => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), typed),
+                    (None, Ok(typed), Ok(stay)) => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), typed, stay),
                 };
                 self.answer(r);
             }
@@ -2978,7 +3020,7 @@ impl AppWindow {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, typed)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, typed, true)
                     }
                 };
                 self.answer(r);
@@ -3032,6 +3074,21 @@ impl AppWindow {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
                 self.kill(&[t.to_owned()], cx);
+            }
+            "terminal.type" => {
+                let t = Self::arg(a, "terminal").unwrap_or_default();
+                let line = match Self::typed_line(a) {
+                    Ok(line) => line,
+                    Err(e) => return self.fail(e),
+                };
+                // Every tab's terminals stay attached (see sync), so any terminal
+                // the window shows can be typed into.
+                let Some(term) = self.terms.values().find(|term| term.address == t) else {
+                    return self.fail(format!("no terminal {t:?} in the window"));
+                };
+                if let Err(e) = term.view.read(cx).type_line(line) {
+                    return self.fail(e);
+                }
             }
             "terminal.peek" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
@@ -5014,6 +5071,58 @@ mod tests {
                 };
                 assert_eq!(run[2], expected);
             }
+        }
+    }
+
+    #[test]
+    fn tabs_that_do_not_stay_run_argv_as_given() {
+        let argv = || Some(vec!["lazygit".to_owned(), "--path".to_owned(), "a b".to_owned()]);
+        assert_eq!(super::AppWindow::tab_argv(argv(), None, None, false), Ok(argv()));
+        assert_eq!(super::AppWindow::tab_argv(argv(), Some("  "), None, false), Ok(argv()));
+        assert_eq!(
+            super::AppWindow::tab_argv(argv(), Some(" first message "), Some("vps"), false),
+            Ok(Some(vec!["lazygit".to_owned(), "--path".to_owned(), "a b".to_owned(), "first message".to_owned()])),
+        );
+        for missing in [None, Some(vec![])] {
+            assert_eq!(super::AppWindow::tab_argv(missing, None, None, false), Err("stay: false needs argv, the program to run".to_owned()));
+        }
+    }
+
+    #[test]
+    fn tabs_that_stay_wrap_argv_in_a_shell_and_keep_the_default_shell() {
+        let argv = Some(vec!["lazygit".to_owned()]);
+        assert_eq!(super::AppWindow::tab_argv(argv.clone(), Some("task"), None, true), Ok(super::AppWindow::agent_argv(argv.clone(), Some("task"), None)));
+        assert_eq!(super::AppWindow::tab_argv(argv.clone(), None, Some("vps"), true), Ok(super::AppWindow::agent_argv(argv, None, Some("vps"))));
+        assert_eq!(super::AppWindow::tab_argv(None, None, None, true), Ok(None));
+        assert_eq!(super::AppWindow::tab_argv(Some(vec![]), None, None, true), Ok(Some(vec![])));
+    }
+
+    #[test]
+    fn stay_defaults_to_true_and_rejects_non_booleans() {
+        use serde_json::json;
+        assert_eq!(super::AppWindow::stay(&json!({})), Ok(true));
+        assert_eq!(super::AppWindow::stay(&json!({"stay": null})), Ok(true));
+        assert_eq!(super::AppWindow::stay(&json!({"stay": true})), Ok(true));
+        assert_eq!(super::AppWindow::stay(&json!({"stay": false})), Ok(false));
+        assert_eq!(super::AppWindow::stay(&json!({"stay": "false"})), Err("stay is true or false, not \"false\"".to_owned()));
+        assert_eq!(super::AppWindow::stay(&json!({"stay": 0})), Err("stay is true or false, not 0".to_owned()));
+    }
+
+    #[test]
+    fn typed_lines_are_plain_text() {
+        use serde_json::json;
+        let typed = |args| super::AppWindow::typed_line(&args).map(str::to_owned);
+        assert_eq!(typed(json!({"line": ":onc \"src/a b.rs:12\""})), Ok(":onc \"src/a b.rs:12\"".to_owned()));
+        assert_eq!(typed(json!({"line": "ünïcode ✓"})), Ok("ünïcode ✓".to_owned()));
+        for (args, error) in [
+            (json!({}), "terminal.type needs line, the text to type".to_owned()),
+            (json!({"line": null}), "terminal.type needs line, the text to type".to_owned()),
+            (json!({"line": ""}), "terminal.type: line is empty".to_owned()),
+            (json!({"line": 1}), "line is a line of text to type, not 1".to_owned()),
+            (json!({"line": "a\rb"}), "terminal.type: line \"a\\rb\" has a control character: only plain text can be typed".to_owned()),
+            (json!({"line": "\u{1b}[201~"}), "terminal.type: line \"\\u{1b}[201~\" has a control character: only plain text can be typed".to_owned()),
+        ] {
+            assert_eq!(typed(args), Err(error));
         }
     }
 
