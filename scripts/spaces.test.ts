@@ -10,6 +10,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
+  const runs: [string, unknown][] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
@@ -25,9 +26,9 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
     () => snapshot, () => [],
-    (name: string, args: { id: string; index: number }) => {
-      expect(name).toBe("space.move");
-      moves.push(args);
+    (name: string, args: any) => {
+      if (name === "space.move") moves.push(args);
+      else runs.push([name, args]);
     },
     ...Array(4).fill(() => element), () => null, () => availability,
   );
@@ -36,7 +37,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, runs, handlers, snapshot, availability };
 }
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -124,7 +125,7 @@ function orderedHarness(ids: string[]) {
   h.view.over = null;
   const git = (id: string, repo: string, linked: boolean) => {
     const s = h.snapshot.find(s => s.id === id)!;
-    h.view.git[JSON.stringify([s.machine ?? null, s.folder])] = { repo, linked };
+    h.view.git[JSON.stringify([s.machine ?? null, s.folder])] = { repo: JSON.stringify([s.machine ?? null, `/src/${repo}/.git`]), linked, name: repo };
   };
   const flush = () => {
     for (const { id, index } of h.moves.splice(0)) {
@@ -152,14 +153,19 @@ test("the sidebar reconciles a full batch once, then the core echo is a no-op", 
   expect(h.order()).toEqual(["other", "main", "a", "b", "tail"]);
 });
 
-test("unshown spaces are preserved and orphan worktrees stay in model order", () => {
+const ids = (rows: any[]) => rows.map((r) => r.w?.id ?? `head:${r.head.name}`);
+
+test("unshown spaces are preserved and a worktree without its checkout goes under its repo's name", () => {
   const h = orderedHarness(["new", "orphan", "a", "main"]);
   h.view.shown.delete("new");
   h.view.born.new = Date.now();
   h.git("orphan", "elsewhere", true);
   h.git("main", "repo", false);
   h.git("a", "repo", true);
-  expect(h.rows().map((r: any) => r.w.id)).toEqual(["orphan", "main", "a"]);
+  const rows = h.rows();
+  expect(ids(rows)).toEqual(["head:elsewhere", "orphan", "main", "a"]);
+  expect(rows[0].head).toEqual({ repo: JSON.stringify([null, "/src/elsewhere/.git"]), name: "elsewhere", machine: null, folder: "/src/elsewhere", kids: ["orphan"] });
+  expect(rows.map((r: any) => r.tree ?? null)).toEqual([null, "└─", null, "└─"]);
   h.flush();
   expect(h.order()).toEqual(["new", "orphan", "main", "a"]);
 });
@@ -279,4 +285,103 @@ test("no reconciliation without a rendered sidebar", () => {
   h.rows();
   h.flush();
   expect(h.order()).toEqual(["main", "topic"]);
+});
+
+test("closing a main checkout leaves its worktrees together under the repo's name", () => {
+  const h = orderedHarness(["x", "main", "a", "b", "y"]);
+  h.git("main", "repo", false);
+  h.git("a", "repo", true);
+  h.git("b", "repo", true);
+  h.rows();
+  expect(h.moves).toEqual([]);
+  h.snapshot.splice(1, 1);
+  const rows = h.rows();
+  expect(ids(rows)).toEqual(["x", "head:repo", "a", "b", "y"]);
+  expect(rows.map((r: any) => r.tree ?? null)).toEqual([null, null, "├─", "└─", null]);
+  expect(h.moves).toEqual([]);
+});
+
+test("scattered worktrees of a repo with no checkout open gather where the first is", () => {
+  const h = orderedHarness(["a", "x", "b", "c"]);
+  h.git("a", "repo", true);
+  h.git("c", "other", true);
+  h.git("b", "repo", true);
+  expect(ids(h.rows())).toEqual(["head:repo", "a", "b", "x", "head:other", "c"]);
+  h.flush();
+  expect(h.order()).toEqual(["a", "b", "x", "c"]);
+  h.rows();
+  expect(h.moves).toEqual([]);
+});
+
+test("a header opens its checkout, which takes the header's place", () => {
+  const h = orderedHarness(["x", "a", "b", "y"]);
+  h.git("a", "repo", true);
+  h.git("b", "repo", true);
+  const head = h.rows()[1].head;
+  h.view.heads = { [`head:${head.repo}`]: head };
+  h.view.header(head, {}, false);
+  h.view.pressed = `head:${head.repo}`;
+  h.handlers.on_mouse_up({}, h.cx);
+  expect(h.runs).toEqual([["space.new", { folder: "/src/repo", machine: "" }]]);
+  // The app adds the new space at the end.
+  h.snapshot.push({ id: "main", folder: "/src/repo" });
+  h.git("main", "repo", false);
+  expect(ids(h.rows())).toEqual(["x", "main", "a", "b", "y"]);
+  h.flush();
+  expect(h.order()).toEqual(["x", "main", "a", "b", "y"]);
+  h.rows();
+  expect(h.view.reopening).toBe(null);
+  expect(h.moves).toEqual([]);
+});
+
+test("a header of a bare repo has no checkout to open", () => {
+  const h = orderedHarness(["a"]);
+  h.view.git[JSON.stringify([null, "/a"])] = { repo: JSON.stringify([null, "/srv/repo.git"]), linked: true, name: "repo" };
+  const head = h.rows()[0].head;
+  expect(head.folder).toBe(null);
+  h.view.header(head, {}, false);
+  h.view.pressed = `head:${head.repo}`;
+  h.handlers.on_mouse_up({}, h.cx);
+  expect(h.runs).toEqual([]);
+});
+
+test("dragging a header moves its whole group, and a drop on it lands above its first worktree", () => {
+  const h = orderedHarness(["a", "b", "x", "y"]);
+  h.git("a", "repo", true);
+  h.git("b", "repo", true);
+  const head = h.rows()[0].head;
+  const key = `head:${head.repo}`;
+  h.view.heads = { [key]: head };
+  h.view.pressed = key;
+  h.view.drop("y");
+  h.flush();
+  expect(h.order()).toEqual(["x", "y", "a", "b"]);
+  h.view.pressed = key;
+  h.view.drop("x");
+  h.flush();
+  expect(h.order()).toEqual(["a", "b", "x", "y"]);
+  h.view.pressed = key;
+  h.view.drop("b");
+  expect(h.moves).toEqual([]);
+  h.view.pressed = "y";
+  h.view.header(head, {}, false);
+  h.view.over = key;
+  h.handlers.on_mouse_up({}, h.cx);
+  h.flush();
+  expect(h.order()).toEqual(["y", "a", "b", "x"]);
+  expect(ids(h.rows())).toEqual(["y", "head:repo", "a", "b", "x"]);
+});
+
+test("a header shows whether a worktree under it needs you, in both widths", () => {
+  const h = orderedHarness(["a", "b"]);
+  h.git("a", "repo", true);
+  h.git("b", "repo", true);
+  const head = h.rows()[0].head;
+  expect(h.view.headStatus(head)).toBe(null);
+  Object.assign(h.snapshot[1], { status: "done" });
+  expect(h.view.headStatus(head)).toBe("done");
+  Object.assign(h.snapshot[0], { status: "blocked" });
+  expect(h.view.headStatus(head)).toBe("blocked");
+  h.view.header(head, {}, true);
+  h.view.header(head, {}, false);
 });

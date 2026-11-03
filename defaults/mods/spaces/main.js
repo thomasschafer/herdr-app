@@ -1,5 +1,6 @@
-// Workspace spaces: stable colored avatars, worktrees under their checkout,
-// grouped by machine when more than one is known. After a space's name, the repo
+// Workspace spaces: stable colored avatars, worktrees under their checkout (under
+// their repo's name when no space has the checkout itself), grouped by machine
+// when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
 // switch, right-click for its menu, drag to reorder.
 
@@ -28,6 +29,11 @@ function place(s, ps) {
 const rowHeight = ({ tree }) => (tree ? 28 : 30);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
+// A repo's main checkout folder from its git info (null for a bare repo: it has none).
+const checkoutOf = (g) => {
+  const dir = JSON.parse(g.repo)[1];
+  return dir.endsWith("/.git") ? dir.slice(0, -5) : null;
+};
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -255,51 +261,105 @@ export default class Spaces extends View {
       && this.ordering.machines.every(name => machines().some(m => m.name === name && m.layout === "ready"));
   }
 
-  // Spaces in order, each worktree space moved under its main checkout's.
+  // Spaces in order, each repo's worktree spaces together: under the first
+  // space that is its main checkout, else under a header row named after the
+  // repo, where the first of them is. A header's rows are { head }, the
+  // others { w, i, g, tree }.
   ordered() {
     const sp = spaces(), ps = panes();
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
-    const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
-    const nested = (r) => r.g?.linked && mains.has(r.g.repo);
+    const mains = new Map(); // repo -> its first main checkout's row
+    for (const r of list) if (r.g && !r.g.linked && !mains.has(r.g.repo)) mains.set(r.g.repo, r);
+    const kids = (repo) => list.filter((k) => k.g?.linked && k.g.repo === repo).map((k) => ({ ...k, group: repo }));
+    // A header just clicked: the checkout it opens takes the header's place.
+    const reopen = this.reopening && Date.now() - this.reopening.at < 10000 && mains.has(this.reopening.repo) ? this.reopening : null;
+    const anchor = (repo) => (reopen?.repo === repo && list.some((r) => r.w.id === reopen.anchor) ? reopen.anchor : mains.get(repo).w.id);
     const out = [];
-    const placed = new Set(); // repos whose worktrees are listed (under the first of its spaces)
+    const placed = new Set(); // repos whose worktrees are listed
     for (const r of list) {
-      if (nested(r)) continue;
-      out.push({ ...r, tree: null });
-      if (!r.g || r.g.linked || placed.has(r.g.repo)) continue;
-      placed.add(r.g.repo);
-      const kids = list.filter((k) => nested(k) && k.g.repo === r.g.repo);
-      kids.forEach((k, n) => out.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
+      const repo = r.g?.repo;
+      if (repo && mains.has(repo) && (r.g.linked || r === mains.get(repo))) {
+        if (r.w.id !== anchor(repo)) continue;
+        out.push({ ...mains.get(repo), tree: null }, ...kids(repo));
+        placed.add(repo);
+      } else if (r.g?.linked) {
+        if (placed.has(repo)) continue;
+        placed.add(repo);
+        const members = kids(repo);
+        const head = { repo, name: r.g.name, machine: r.w.machine ?? null, folder: checkoutOf(r.g), kids: members.map((k) => k.w.id) };
+        out.push({ head }, ...members);
+      } else {
+        out.push({ ...r, tree: null });
+      }
     }
-    // Simulate the batch so later indexes include earlier moves. An attempted
-    // write can lose a sync conflict: allow the echo to settle before retrying.
-    const order = sp.map(w => w.id);
-    const target = out.map(r => r.w.id);
+    const target = out.filter((r) => r.w).map((r) => r.w.id);
+    if (reopen && target.every((id, i) => id === sp[i].id)) this.reopening = null;
+    this.reorder(sp, target);
+    const rows = out.filter((r) => (r.w ? this.shown.has(r.w.id) : r.head.kids.some((id) => this.shown.has(id))));
+    return rows.map((r, n) => (r.group ? { ...r, tree: rows[n + 1]?.group === r.group ? "├─" : "└─" } : r));
+  }
+
+  // Moves spaces into `target` (ids) order. Simulates the batch so later indexes
+  // include earlier moves. An attempted write can lose a sync conflict: allow
+  // the echo to settle before retrying.
+  reorder(sp, target) {
+    const order = sp.map((w) => w.id);
     const key = JSON.stringify([order, target, machines()]);
     if (order.every((id, i) => id === target[i])) {
       this.ordering = null;
     } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
+      const machine = new Map(sp.map((w) => [w.id, w.machine ?? null]));
       const moved = new Set();
       this.ordering = { key, at: Date.now(), machines: [] };
-      for (let i = 0; i < out.length; i++) {
-        const from = order.indexOf(out[i].w.id);
+      for (let i = 0; i < target.length; i++) {
+        const from = order.indexOf(target[i]);
         if (from === i) continue;
-        run("space.move", { id: out[i].w.id, index: i + 1 });
-        moved.add(out[i].w.machine ?? null);
+        run("space.move", { id: target[i], index: i + 1 });
+        moved.add(machine.get(target[i]));
         order.splice(i, 0, order.splice(from, 1)[0]);
       }
       this.ordering.machines = [...moved];
     }
-    return out.filter(r => this.shown.has(r.w.id));
+  }
+
+  // Where a pressed row (a space, or a header by its key) sits among spaces().
+  pressedIndex(sp) {
+    const head = this.heads?.[this.pressed];
+    return sp.findIndex((s) => s.id === (head ? head.kids[0] : this.pressed));
+  }
+
+  pressedMachine(sp) {
+    const head = this.heads?.[this.pressed];
+    return head ? head.machine : (sp.find((s) => s.id === this.pressed)?.machine ?? null);
+  }
+
+  // A drop on `onto` (a space id): a header's whole group moves there, a space just itself.
+  drop(onto) {
+    const sp = spaces();
+    const head = this.heads?.[this.pressed];
+    if (!head) {
+      const index = sp.findIndex((s) => s.id === onto);
+      if (index !== -1) run("space.move", { id: this.pressed, index: index + 1 });
+      return;
+    }
+    if (head.kids.includes(onto)) return;
+    const down = this.pressedIndex(sp) < sp.findIndex((s) => s.id === onto);
+    const rest = sp.map((s) => s.id).filter((id) => !head.kids.includes(id));
+    const at = rest.indexOf(onto);
+    if (at === -1) return;
+    rest.splice(down ? at + 1 : at, 0, ...head.kids);
+    this.reorder(sp, rest);
   }
 
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
-    const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
-    const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
+    this.heads = Object.fromEntries(rows.filter((r) => r.head).map((r) => [`head:${r.head.repo}`, r.head]));
+    const draw = (r) => (r.head ? this.header(r.head, t, collapsed) : collapsed ? this.compact(r, t) : this.row(r, t));
+    const machineOf = (r) => (r.head ? r.head.machine : (r.w.machine ?? null));
+    const remote = [...new Set([...rows.map(machineOf).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
@@ -309,7 +369,7 @@ export default class Spaces extends View {
     if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : rows.map(draw);
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
-      const mine = rows.filter((r) => (r.w.machine ?? null) === m);
+      const mine = rows.filter((r) => machineOf(r) === m);
       const repair = this.reconnecting[m];
       const machine = this.machines.find(k => k.name === m) ?? repair?.machine;
       const connected = !m || machine?.state === "connected";
@@ -369,7 +429,7 @@ export default class Spaces extends View {
 
   row({ w, i, g, tree }, t) {
     const on = w.active;
-    const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
+    const fromIndex = this.pressed === null ? -1 : this.pressedIndex(spaces());
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
@@ -394,8 +454,7 @@ export default class Spaces extends View {
         this.over = w.id;
       })
       .on_mouse_move((_e, cx) => {
-        const source = spaces().find(s => s.id === this.pressed);
-        const over = source && (source.machine ?? null) === (w.machine ?? null) ? w.id : null;
+        const over = this.pressedIndex(spaces()) !== -1 && this.pressedMachine(spaces()) === (w.machine ?? null) ? w.id : null;
         if (this.pressed !== null && this.over !== over) {
           this.over = over;
           cx.notify();
@@ -407,8 +466,9 @@ export default class Spaces extends View {
         this.pressed = null;
         this.over = null;
         if (from !== null && over === w.id && from !== w.id) {
-          const index = spaces().findIndex(s => s.id === w.id);
-          if (index !== -1) run("space.move", { id: from, index: index + 1 });
+          this.pressed = from;
+          this.drop(w.id);
+          this.pressed = null;
         } else if (from === w.id) run("space.select", { id: w.id });
         cx.notify();
       })
@@ -422,6 +482,71 @@ export default class Spaces extends View {
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
+  }
+
+  // What a header shows of its worktrees: one needing you (blocked), else one done.
+  headStatus(head) {
+    const statuses = spaces().filter((s) => head.kids.includes(s.id)).map((s) => s.status);
+    return ["blocked", "done"].find((s) => statuses.includes(s)) ?? null;
+  }
+
+  // A repo none of whose spaces is its main checkout: its name over its
+  // worktrees. Click opens the checkout in its place; drag moves the group.
+  header(head, t, collapsed) {
+    const id = `head:${head.repo}`;
+    const status = this.headStatus(head);
+    const open = () => {
+      if (!head.folder) return;
+      this.reopening = { repo: head.repo, anchor: head.kids[0], at: Date.now() };
+      run("space.new", { folder: head.folder, machine: head.machine ?? "" });
+    };
+    const anchorIndex = spaces().findIndex((s) => s.id === head.kids[0]);
+    const fromIndex = this.pressed === null ? -1 : this.pressedIndex(spaces());
+    const el = h_flex()
+      .relative()
+      .id(id)
+      .flex_none()
+      .items_center()
+      .when(head.folder !== null, (el) => el.hover((s) => s.bg(t.hover)).tooltip(`Open ${head.name}`))
+      .when(this.pressed === id && this.over !== id, (el) => el.opacity(0.5))
+      .when(this.pressed !== null && this.over === id && this.pressed !== id, (el) => el.child(
+        div().absolute().left(0).right(0).h(2).bg(t.accent)
+          .when(fromIndex < anchorIndex, (line) => line.bottom(0))
+          .when(fromIndex > anchorIndex, (line) => line.top(0)),
+      ))
+      .on_mouse_down("left", () => {
+        this.pressed = id;
+        this.over = id;
+      })
+      .on_mouse_move((_e, cx) => {
+        const over = this.pressedIndex(spaces()) !== -1 && this.pressedMachine(spaces()) === head.machine ? id : null;
+        if (this.pressed !== null && this.over !== over) {
+          this.over = over;
+          cx.notify();
+        }
+      })
+      .on_mouse_up("left", (_e, cx) => {
+        const from = this.pressed;
+        const over = this.over;
+        this.pressed = null;
+        this.over = null;
+        if (from === id) open();
+        else if (from !== null && over === id) {
+          this.pressed = from;
+          this.drop(head.kids[0]);
+          this.pressed = null;
+        }
+        cx.notify();
+      });
+    if (collapsed) {
+      return el.h(26).justify_center().gap(4).text_color(t.dim)
+        .child(svg("mods/workspace-chrome/folder.svg").size(12))
+        .when(status !== null, (el) => el.child(div().text_color(tone(t, status)).child(glyph(status))));
+    }
+    return el.h(30).px(8).gap(9).rounded(8)
+      .child(h_flex().size(18).flex_none().items_center().justify_center().text_color(t.dim).child(svg("mods/workspace-chrome/folder.svg").size(14)))
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(head.name))
+      .when(status !== null, (el) => el.child(div().flex_none().text_color(tone(t, status)).child(glyph(status))));
   }
 
   compact({ w, i }, t) {

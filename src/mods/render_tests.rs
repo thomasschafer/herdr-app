@@ -407,6 +407,23 @@ fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn worktrees_without_their_checkout_draw_under_their_repo(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let space = |id: &str, status: Option<&str>| json!({"id":id,"index":1,"name":id,"named":false,"folder":format!("/src/{id}"),"machine":null,"branch":id,"active":false,"status":status,"tabs":[]});
+    let mut values = fixture(false, props(), updates("current", "current"));
+    values.insert("spaces".into(), json!([space("w1", None), space("w2", Some("blocked"))]));
+    let setup = "for (const id of ['w1', 'w2']) this.git[JSON.stringify([null, `/src/${id}`])] = \
+        { name: 'repo', branch: id, ahead: 0, behind: 0, repo: JSON.stringify([null, '/src/repo/.git']), linked: true }; \
+        this.shown = new Set(['w1', 'w2']);";
+    let tree = describe_with_values(cx, &staged, "mods/spaces", values, Some(setup)).unwrap();
+    let head = tree.find("head:").unwrap_or_else(|| panic!("no repo header: {tree}"));
+    let (w1, w2) = (tree.find("space-w1").unwrap(), tree.find("space-w2").unwrap());
+    assert!(head < w1 && w1 < w2, "{tree}");
+    assert!(tree.contains("Open repo"), "{tree}");
+}
+
+#[gpui::test]
 fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

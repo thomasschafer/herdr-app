@@ -823,8 +823,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   that first tab; checkouts go to
   `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
   at its top, with the submodules checked out where it was made from; the
-  `spaces` sidebar nests worktree spaces under their repo's and shows each
-  space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
+  `spaces` sidebar nests worktree spaces under their repo's main checkout
+  space, or under a header named after the repo when no space has the checkout
+  (click it to open the checkout there; drag it to move them all), keeps
+  spaces() in that order, and shows each space's repo, branch, ahead/behind
+  and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
 
 ### Check before you finish
