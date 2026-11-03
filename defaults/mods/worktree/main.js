@@ -59,9 +59,12 @@ async function git(cwd, args, on) {
 }
 
 // The submodule repos git keeps for a checkout (nested ones too, checked out
-// or not): { name, dir, pinned }. `config` is the args that read its
-// .gitmodules; `pinned` is the commit its parent records ("" if none).
-async function modules(gitDir, config, on, out = [], parent = "") {
+// or not): { name, dir, pinned, under, path }. `config` is the args that read
+// its .gitmodules; `pinned` is the commit its parent records ("" if none);
+// `path` is where it sits in its parent's checkout, and `under` is where that
+// parent sits in the top checkout ("" for the top itself). Parents come
+// before the submodules inside them.
+async function modules(gitDir, config, on, out = [], parent = "", under = "") {
   const keys = await git(gitDir, ["--git-dir", gitDir, "config", ...config, "-z", "--get-regexp", "^submodule\\..*\\.path$"], on);
   if (!keys.ok) return out; // no .gitmodules, or no submodules in it
   // -z: "key\nvalue" records ended by NUL, so names and paths may hold spaces.
@@ -70,10 +73,11 @@ async function modules(gitDir, config, on, out = [], parent = "") {
     const name = record.slice("submodule.".length, at - ".path".length);
     const dir = `${gitDir}/modules/${name}`;
     if (!(await git(gitDir, ["--git-dir", dir, "rev-parse", "--git-dir"], on)).ok) continue; // never checked out
-    const pinned = await git(gitDir, ["--git-dir", gitDir, "rev-parse", `HEAD:${record.slice(at + 1)}`], on);
+    const path = record.slice(at + 1);
+    const pinned = await git(gitDir, ["--git-dir", gitDir, "rev-parse", `HEAD:${path}`], on);
     // Names are only unique within their parent: nested ones carry its name.
-    out.push({ name: parent + name, dir, pinned: pinned.ok ? pinned.out : "" });
-    if ((await git(gitDir, ["--git-dir", dir, "cat-file", "-e", "HEAD:.gitmodules"], on)).ok) await modules(dir, ["--blob", "HEAD:.gitmodules"], on, out, `${parent + name}/`);
+    out.push({ name: parent + name, dir, pinned: pinned.ok ? pinned.out : "", under, path });
+    if ((await git(gitDir, ["--git-dir", dir, "cat-file", "-e", "HEAD:.gitmodules"], on)).ok) await modules(dir, ["--blob", "HEAD:.gitmodules"], on, out, `${parent + name}/`, joined(under, path));
   }
   return out;
 }
@@ -82,17 +86,49 @@ async function modules(gitDir, config, on, out = [], parent = "") {
 // nowhere else: not on a remote, and not the commit the parent pins (git
 // fetches that by hash, so it is often on no remote branch here).
 async function submodules(top, on) {
-  const gitDir = await git(top, ["rev-parse", "--absolute-git-dir"], on);
-  if (!gitDir.ok) throw new Error(gitDir.err || "git rev-parse failed.");
-  const mods = await modules(gitDir.out, ["--file", `${top}/.gitmodules`], on);
+  const gitDir = await gitDirOf(top, on);
+  const mods = await modules(gitDir, ["--file", `${top}/.gitmodules`], on);
   const unpushed = [];
   for (const m of mods) {
-    const local = await git(gitDir.out, ["--git-dir", m.dir, "rev-list", "-n1", "--all", "--not", "--remotes", ...(m.pinned ? [m.pinned] : [])], on);
+    const local = await git(gitDir, ["--git-dir", m.dir, "rev-list", "-n1", "--all", "--not", "--remotes", ...(m.pinned ? [m.pinned] : [])], on);
     if (!local.ok) throw new Error(local.err || `Couldn't check submodule ${m.name}.`);
     if (local.out) unpushed.push(m.name);
   }
   return { mods, unpushed };
 }
+
+// Checks out in a new worktree the submodules checked out where it was made
+// from (nested ones too), borrowing their objects from there so a big one
+// isn't downloaded again. --dissociate copies what it borrowed, so the new
+// checkout keeps working when the other is removed. A submodule the new
+// worktree's branch doesn't have is left out, with everything inside it.
+async function cloneSubmodules(from, to, on) {
+  const left = [];
+  for (const m of await modules(await gitDirOf(from, on), ["--file", `${from}/.gitmodules`], on)) {
+    const at = joined(m.under, m.path);
+    if (left.some((l) => m.under === l || m.under.startsWith(`${l}/`))) {
+      left.push(at);
+      continue;
+    }
+    const cwd = m.under ? `${to}/${m.under}` : to;
+    const link = await git(cwd, ["ls-files", "--stage", "--", m.path], on);
+    if (!link.ok) throw new Error(link.err || `Couldn't look for submodule ${m.name}.`);
+    if (!link.out.startsWith("160000 ")) {
+      left.push(at);
+      continue;
+    }
+    const r = await git(cwd, ["submodule", "update", "--init", "--reference", m.dir, "--dissociate", "--", m.path], on);
+    if (!r.ok) throw new Error(r.err || `git submodule update failed for ${m.name}.`);
+  }
+}
+
+async function gitDirOf(top, on) {
+  const gitDir = await git(top, ["rev-parse", "--absolute-git-dir"], on);
+  if (!gitDir.ok) throw new Error(gitDir.err || "git rev-parse failed.");
+  return gitDir.out;
+}
+
+const joined = (under, path) => (under ? `${under}/${path}` : path);
 
 // The repo a folder belongs to: its main checkout and name, and whether
 // the folder is itself a linked worktree. null outside git.
@@ -187,10 +223,14 @@ export default class Worktree extends View {
     const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
     const r = await git(this.repo.top, add, this.on);
     if (!r.ok) return r.err || "git worktree add failed.";
+    // The checkout is usable without its submodules: open it either way, and say what's missing.
+    let missing = "";
+    try { await cloneSubmodules(this.repo.top, path, this.on); }
+    catch (error) { missing = `The worktree is made, but its submodules aren't: ${error.message ?? error}`; }
     const p = props();
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
     run("space.new", { folder: path, machine: this.on, tab: p.tab, argv: p.argv });
-    return "";
+    return missing;
   }
 
   shown() {
@@ -318,7 +358,7 @@ export default class Worktree extends View {
             ? !r.linked
               ? "This is the repository's main checkout, not a worktree."
               : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
+            : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here. Submodules checked out here are checked out there too.`;
     const blocked = !r || (remove && !r.linked);
     return v_flex()
       .id("worktree")

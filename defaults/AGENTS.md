@@ -822,7 +822,7 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
   that first tab; checkouts go to
   `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
-  at its top; the
+  at its top, with the submodules checked out where it was made from; the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
