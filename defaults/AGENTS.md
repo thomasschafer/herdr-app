@@ -77,7 +77,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 |---|---|---|
 | `layouts/<name>.json` | the window and its whole look: blocks, theme, fonts, backgrounds, pane frames; one file per layout (`main`, `terminals`, `win98`, any you add) | live |
 | `keys.json` | what every key does | live |
-| `settings.json` | the person: zoom, sounds, fonts for every layout | live |
+| `settings.json` | the person: zoom, sounds, notifications, fonts for every layout | live |
 | `mods/<name>/` | panels: small JavaScript programs | live (hot reload) |
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
@@ -604,6 +604,7 @@ The main ones:
   `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`).
 - App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (again: closes it), `overlay.close {id?}`, `app.help` (again: closes it), `app.palette` (again: closes it), `app.settings {section?}`
   (sections: `look`, `machines`, `alerts`, `updates`, `privacy`; Machines lists, updates, renames and removes ssh machines; settings edit the same files you do).
+  `app.test_notification` (macOS: a system notification now, whatever is in front; it asks permission the first time),
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer herdr-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
@@ -647,9 +648,18 @@ What's about the user, never a look:
 - `sounds`: `{ "enabled": true, "done": "<file>", "blocked": "<file>" }`.
   When an agent needs the person, or finishes while they aren't looking at
   it, Herdr plays a sound and (unless they're looking) posts a toast that
-  goes there when clicked. `done` / `blocked` replace the bundled MP3s
+  goes there when clicked, or a system notification while Herdr is in the
+  background (`notifications`). `done` / `blocked` replace the bundled MP3s
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
+- `notifications` (macOS; elsewhere alerts stay toasts): `{ "system": true, "bounce": true }`. While Herdr isn't the
+  active window, `system` posts a system notification instead of the toast:
+  one per agent (a newer alert replaces it), withdrawn once the person looks
+  at that agent or it moves on; clicking it brings Herdr forward on that
+  agent. `bounce` bounces the macOS Dock icon once for an agent that needs
+  them. The Dock icon's badge counts the agents that need them or finished
+  unseen, whatever is in front. Only the installed app (a bundle)
+  posts them, asking permission the first time; other builds keep the toast.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.

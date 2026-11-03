@@ -463,6 +463,22 @@ fn machine_setup_prompt_stacks_above_the_picker(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn notification_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for platform in ["linux", "windows", "macos"] {
+        let mut p = props();
+        p["section"] = json!("alerts");
+        let mut values = fixture(true, p, updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform}));
+        let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+        for id in ["st-notify-system", "st-notify-bounce", "st-notify-test"] {
+            assert_eq!(tree.contains(id), platform == "macos", "{platform}: {id}: {tree}");
+        }
+    }
+}
+
+#[gpui::test]
 fn option_key_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

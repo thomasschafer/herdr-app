@@ -156,7 +156,9 @@ impl NotificationCenter {
         });
         self.center
             .requestAuthorizationWithOptions_completionHandler(
-                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+                // HERDR: Badge too, for the Dock badge (`NSDockTile.badgeLabel`)
+                // that macOS gates behind the app's notification settings.
+                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge,
                 &completion,
             );
     }

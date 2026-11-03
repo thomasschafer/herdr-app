@@ -370,6 +370,7 @@ pub struct Person {
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
     pub zoom: f32,
     pub sounds: Sounds,
+    pub notifications: Notifications,
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
@@ -491,6 +492,7 @@ impl Default for Person {
         Person {
             zoom: 1.0,
             sounds: Sounds::default(),
+            notifications: Notifications::default(),
             core: None,
             font: None,
             font_size: None,
@@ -544,6 +546,7 @@ pub struct Settings {
     #[serde(deserialize_with = "read_background_blur")]
     pub background_blur: u32,
     pub sounds: Sounds,
+    pub notifications: Notifications,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -562,6 +565,22 @@ pub struct Sounds {
 impl Default for Sounds {
     fn default() -> Self {
         Sounds { enabled: true, done: None, blocked: None }
+    }
+}
+
+/// How an agent's alert reaches the person while Herdr isn't the active window
+/// (in front, it's a toast). `system`: a system notification instead of the
+/// toast. `bounce`: the Dock icon bounces once when an agent needs them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notifications {
+    pub system: bool,
+    pub bounce: bool,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Notifications { system: true, bounce: true }
     }
 }
 
@@ -588,6 +607,7 @@ impl Default for Settings {
             background_opacity_cells: false,
             background_blur: 0,
             sounds: Sounds::default(),
+            notifications: Notifications::default(),
         }
     }
 }
@@ -625,6 +645,7 @@ impl Settings {
             background_opacity_cells: person.background_opacity_cells,
             background_blur: person.background_blur,
             sounds: person.sounds.clone(),
+            notifications: person.notifications.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,

@@ -485,6 +485,12 @@ Toggle the command palette: every command by name, with its key; calling again c
 
 No arguments.
 
+## `app.test_notification`
+
+Post a system notification now, to check Herdr may show them (macOS only; it asks the first time).
+
+No arguments.
+
 ## `app.settings`
 
 Open the settings (section: look, alerts, updates).

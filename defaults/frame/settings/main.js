@@ -678,13 +678,42 @@ export default class Settings extends View {
         this.row(
           t,
           "Play sounds",
-          "When an agent needs you, and when one finishes while you're not looking. A note shows in the corner either way.",
+          "When an agent needs you, and when one finishes while you're not looking.",
           this.toggle(t, "st-sounds", on, (_e, cx) => this.change((p) => (p.sounds = { ...(p.sounds ?? {}), enabled: !on }), cx)),
         ),
       )
       .child(this.row(t, "An agent needs you", file(sounds.blocked), this.button(t, "st-play-blocked", "Play", () => playSound("blocked"))))
       .child(this.row(t, "An agent finished", file(sounds.done), this.button(t, "st-play-done", "Play", () => playSound("done"))))
-      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."));
+      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."))
+      .when(window()?.platform === "macos", (el) => el.child(this.notifications(t)));
+  }
+
+  notifications(t) {
+    const n = this.person.notifications ?? {};
+    const system = n.system !== false;
+    const bounce = n.bounce !== false;
+    const set = (key, value) => (_e, cx) => this.change((p) => (p.notifications = { ...(p.notifications ?? {}), [key]: value }), cx);
+    return v_flex()
+      .w_full()
+      .pt(20)
+      .child(this.heading(t, "Notifications"))
+      .child(
+        this.row(
+          t,
+          "Notify me in the background",
+          "While Herdr isn't the app in front, an agent that needs you or finishes posts a system notification; click it to go there. In front, a note shows in the corner instead.",
+          this.toggle(t, "st-notify-system", system, set("system", !system)),
+        ),
+      )
+      .child(
+        this.row(
+          t,
+          "Bounce the Dock icon",
+          "Once, when an agent needs you while Herdr is in the background. The Dock icon also counts the agents that need you or finished unseen.",
+          this.toggle(t, "st-notify-bounce", bounce, set("bounce", !bounce)),
+        ),
+      )
+      .child(this.row(t, "Test notification", "macOS asks whether Herdr may notify you the first time.", this.button(t, "st-notify-test", "Send", () => run("app.test_notification"))));
   }
 
   // Updates --------------------------------------------------------------

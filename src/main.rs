@@ -1,6 +1,7 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod attention;
 mod bench;
 mod background;
 mod commands;
@@ -160,6 +161,7 @@ fn main() {
             settings::note_fonts(cx.text_system().all_font_names());
             settings::load_home_fonts(cx);
             mods::init(cx);
+            attention::init(cx);
             // Not restarted for it: the update goes in when the app quits.
             cx.on_app_quit(|cx| {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);

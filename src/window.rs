@@ -434,6 +434,10 @@ pub struct AppWindow {
     synced_model_pane: Option<String>,
     pane_history: Vec<String>,
     window_active: bool,
+    /// System notifications on screen, by agent, and the alert each was posted for.
+    posted: HashMap<String, model::Alert>,
+    /// What the Dock badge shows now (None: not set since the start).
+    badge: Option<usize>,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
@@ -523,6 +527,8 @@ impl AppWindow {
             synced_model_pane: None,
             pane_history: Vec::new(),
             window_active: true,
+            posted: HashMap::new(),
+            badge: None,
             system_dark: is_dark(window.appearance()),
             file_events: crate::files::watch(&mods::app_dir()),
             polls: 0,
@@ -1641,6 +1647,7 @@ impl AppWindow {
 
     /// Tells mods what changed (they re-render only if something did).
     fn publish(&mut self, cx: &mut Context<Self>) {
+        self.tend_attention(cx);
         let m = &self.model;
         let home = home();
         let spaces: Vec<Value> = m
@@ -2026,9 +2033,10 @@ impl AppWindow {
         }
     }
 
-    /// Tells the person an agent needs them or finished: Herdr's sounds, and a
-    /// toast (drawn by the `toast` mod; click it to go there) unless they're
-    /// looking at that agent.
+    /// Tells the person an agent needs them or finished: Herdr's sounds, and
+    /// unless they're looking at that agent, a toast (drawn by the `toast` mod;
+    /// click it to go there) or, with Herdr in the background, a system
+    /// notification and a Dock bounce (`attention::delivery`).
     fn alert(&mut self, addr: &str, alert: model::Alert, looking: bool, window: &mut Window, cx: &mut Context<Self>) {
         if settings::get().sounds.enabled {
             crate::sound::play(if alert == model::Alert::Blocked { "blocked" } else { "done" });
@@ -2059,11 +2067,45 @@ impl AppWindow {
             model::Alert::Blocked => (format!("{name} needs you"), "error"),
             model::Alert::Done => (format!("{name} finished"), "info"),
         };
-        let notification = json!({
-            "title": title, "body": place, "level": level,
-            "action": { "name": "agent.focus", "args": { "terminal": addr } },
-        });
-        self.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": notification }), window, cx);
+        let to = crate::attention::delivery(alert, looking, self.window_active, &settings::get().notifications);
+        if to.bounce {
+            window.request_attention();
+        }
+        if to.system {
+            cx.show_system_notification(crate::attention::agent_notification(addr, &title, place.as_deref().unwrap_or_default()));
+            self.posted.insert(addr.to_owned(), alert);
+        }
+        if to.toast {
+            let notification = json!({
+                "title": title, "body": place, "level": level,
+                "action": { "name": "agent.focus", "args": { "terminal": addr } },
+            });
+            self.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": notification }), window, cx);
+        }
+    }
+
+    /// After a change: withdraws notifications that are old news and keeps the
+    /// Dock badge to the agents that need the person or finished unseen.
+    fn tend_attention(&mut self, cx: &mut Context<Self>) {
+        let looking: HashSet<String> = if self.window_active { self.visible_addresses().into_iter().collect() } else { HashSet::new() };
+        let model = &self.model;
+        let live = &self.live;
+        let status = |addr: &str| live.contains_key(addr).then(|| model.status(addr)).flatten();
+        let stale: Vec<String> = self.posted.iter()
+            .filter(|(addr, alert)| crate::attention::stale(**alert, status(addr), looking.contains(*addr)))
+            .map(|(addr, _)| addr.clone())
+            .collect();
+        for addr in stale {
+            cx.dismiss_system_notification(&crate::attention::agent_tag(&addr));
+            self.posted.remove(&addr);
+        }
+        let wanting: HashSet<String> = model.tabs().flat_map(|c| model::addresses(&c.root))
+            .filter(|a| matches!(status(a), Some("blocked" | "done")))
+            .collect();
+        if self.badge != Some(wanting.len()) {
+            self.badge = Some(wanting.len());
+            crate::attention::set_badge(crate::attention::badge_label(wanting.len()).as_deref());
+        }
     }
 
     /// Keeps the model true to core, on every listing: drops panes whose terminal
@@ -3342,6 +3384,12 @@ impl AppWindow {
                 return;
             }
             "app.check_updates" => crate::update::check_now(),
+            "app.test_notification" => {
+                if !crate::attention::system_notifications() {
+                    return self.fail("system notifications need the installed Herdr on macOS");
+                }
+                cx.show_system_notification(crate::attention::test_notification());
+            }
             "app.update_core" => {
                 if crate::update::core().ready.is_none() && crate::update::core().error.is_none() {
                     return self.fail("herdr-core is up to date");
@@ -5472,6 +5520,92 @@ export default class Probe extends View {
             assert_eq!(run(cx, "pane.swap", json!({ "direction": "right" })), ("a".into(), Some("a".into())), "{label}");
             view.update(cx, |this, _| assert_eq!(this.model.active_tab().unwrap().root, before, "{label}: a zoomed pane.swap swaps nothing"));
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn alerts_notify_the_system_in_the_background_and_toast_in_front() {
+        in_own_process("background_alerts");
+    }
+
+    #[gpui::test]
+    fn background_alerts(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("background_alerts") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({"id": "context", "type": "block", "content": {"tab": "active"}}));
+        cx.update(|_, cx| cx.set_app_identity("dev.herdr.test", "Herdr"));
+        let toasts = |cx: &mut gpui::VisualTestContext| view.update(cx, |this, _| this.overlays.iter().filter(|o| matches!(o.kind, super::OverlayKind::Toast)).count());
+        // "shown" in the first tab, "hidden" in the second (not looked at).
+        view.update_in(cx, |this, window, cx| {
+            this.folders.retain(|id, _| id == "unused");
+            this.model.add_space("space", "test", "/", super::Tab::new("tab1", "", "a", "t-shown"));
+            this.model.add_tab("space", super::Tab::new("tab2", "", "b", "t-hidden"));
+            this.model.space_mut("space").unwrap().active = Some("tab1".into());
+            for addr in ["t-shown", "t-hidden"] {
+                this.live.insert(addr.into(), json!({ "status": "working", "turn": 1 }));
+            }
+            this.listed_once = true;
+            this.tend_terminals(true, window, cx);
+        });
+        let tend = |cx: &mut gpui::VisualTestContext, addr: &str, status: &str, active: bool| {
+            view.update_in(cx, |this, window, cx| {
+                this.window_active = active;
+                this.live.insert(addr.into(), json!({ "status": status, "turn": 2 }));
+                this.tend_terminals(true, window, cx);
+                this.badge
+            })
+        };
+        let tag = crate::attention::agent_tag("t-hidden");
+
+        // In the background: a notification, not a toast; the badge counts it.
+        assert_eq!(tend(cx, "t-hidden", "blocked", false), Some(1));
+        assert_eq!(cx.delivered_system_notifications().iter().map(|n| n.tag.to_string()).collect::<Vec<_>>(), [tag.clone()]);
+        assert_eq!(toasts(cx), 0);
+        // Back to work: withdrawn, and the badge clears.
+        assert_eq!(tend(cx, "t-hidden", "working", false), Some(0));
+        assert_eq!(cx.dismissed_system_notifications(), [gpui::SharedString::from(tag.clone())]);
+        assert!(cx.delivered_system_notifications().is_empty());
+
+        // Finished in the background, then looked at once Herdr is in front.
+        assert_eq!(tend(cx, "t-hidden", "idle", false), Some(1));
+        assert_eq!(cx.delivered_system_notifications().len(), 1);
+        view.update_in(cx, |this, window, cx| {
+            this.window_active = true;
+            this.model.space_mut("space").unwrap().active = Some("tab2".into());
+            this.sync(window, cx);
+        });
+        assert!(cx.delivered_system_notifications().is_empty(), "looking at it withdraws it");
+        assert_eq!(view.update(cx, |this, _| this.badge), Some(0), "seen: no longer counted");
+
+        // In front but elsewhere: a toast, no notification.
+        let shown = cx.shown_system_notifications().len();
+        assert_eq!(tend(cx, "t-shown", "blocked", true), Some(1));
+        assert_eq!(cx.shown_system_notifications().len(), shown);
+        assert_eq!(toasts(cx), 1);
+
+        // Without system notifications, the background gets the toast too.
+        let quiet = crate::settings::Notifications { system: false, bounce: false };
+        crate::settings::set(crate::settings::Settings { notifications: quiet, ..(*crate::settings::get()).clone() });
+        assert_eq!(tend(cx, "t-hidden", "blocked", false), Some(2));
+        assert_eq!(cx.shown_system_notifications().len(), shown);
+        assert_eq!(toasts(cx), 2);
+
+        // Clicking an agent's notification goes to it.
+        view.update_in(cx, |this, window, cx| {
+            this.model.space_mut("space").unwrap().active = Some("tab1".into());
+            this.sync(window, cx);
+        });
+        cx.update(|_, cx| crate::attention::init(cx));
+        cx.simulate_system_notification_response(gpui::SystemNotificationResponse { tag: tag.clone().into(), action_id: None });
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(view.update(cx, |this, _| this.model.active_tab().map(|c| c.id.clone())).as_deref(), Some("tab2"));
+
+        // The test notification shows whatever is in front.
+        view.update_in(cx, |this, window, cx| this.run("app.test_notification", json!({}), window, cx));
+        assert_eq!(cx.shown_system_notifications().len(), shown + 1);
     }
 
     include!("window/pane_size_tests.rs");
