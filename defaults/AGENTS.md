@@ -99,6 +99,9 @@ is no `spaces.json`. On simultaneous edits the newest accepted document wins
 (no merging); structural commands fail while that machine's layout is unavailable.
 Mod pane props are stored as given, never machine-qualified. Space order is local
 machine first, then machines by name; `space.move` stays inside its machine's block.
+Within a machine, a git worktree's space comes right after the first space that
+is its repo's main checkout (by each space's first terminal), so `space.next`,
+`space.select {index}` and the sidebar agree; moving a checkout takes its worktrees.
 In the expanded Spaces sidebar, drag a space to reorder it within its machine;
 the highlighted line shows where it will land.
 
@@ -936,7 +939,7 @@ The full surface is in `gpui-kit.d.ts` next to this file.
 All of it is in `herdr.d.ts`. In short:
 
 - Live data: `spaces()` (each with its tabs, status, name, named, folder,
-  machine, branch), `machines()` (name, null for this computer; layout:
+  machine, branch, worktree_of), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
   the first read even if it fails, and offline machines are unavailable),
   `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"

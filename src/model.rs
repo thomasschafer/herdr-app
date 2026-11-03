@@ -182,11 +182,32 @@ impl Model {
         crate::mirror::qualify(&self.fresh_id(prefix), machine)
     }
 
-    /// Machine blocks have one order on every screen; order inside each stays shared.
+    /// Machine blocks have one order on every screen; order inside each stays
+    /// shared. Inside a block, each linked worktree's space comes right after its
+    /// repo's main checkout's (`worktree_parents`), siblings in their own order, so
+    /// stepping through spaces and numbering them go as the list shows them.
     pub fn order_spaces(&mut self) {
         self.spaces.sort_by(|a, b| a.machine.cmp(&b.machine));
+        let parents = self.worktree_parents();
+        let mut order = Vec::with_capacity(parents.len());
+        for (i, parent) in parents.iter().enumerate() {
+            if parent.is_none() {
+                order.push(i);
+                order.extend(parents.iter().enumerate().filter(|(_, p)| **p == Some(i)).map(|(k, _)| k));
+            }
+        }
+        // A parent is never itself under another, so each space is placed exactly once.
+        assert_eq!(order.len(), self.spaces.len(), "worktree grouping lost or repeated a space: {parents:?}");
+        if order.iter().enumerate().all(|(at, i)| at == *i) {
+            return;
+        }
+        let mut old: Vec<Option<Space>> = std::mem::take(&mut self.spaces).into_iter().map(Some).collect();
+        self.spaces = order.into_iter().map(|i| old[i].take().expect("each space is placed once")).collect();
     }
 
+    /// Moves a space within its machine's block. A main checkout's worktrees
+    /// follow it; a worktree stays under its checkout, moved out of its group it
+    /// goes to that end of it.
     pub fn move_space(&mut self, id: &str, index: usize) -> bool {
         self.order_spaces();
         let Some(from) = self.spaces.iter().position(|s| s.id == id) else { return false };
@@ -196,6 +217,7 @@ impl Model {
         let to = index.saturating_sub(1).clamp(first, last);
         let space = self.spaces.remove(from);
         self.spaces.insert(to, space);
+        self.order_spaces();
         true
     }
 
@@ -266,18 +288,50 @@ impl Model {
         self.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|c| c.root.find(node).is_some())
     }
 
-    /// Adds a space at the end and selects it.
     /// What a space is called: its name, else its first terminal's checkout
     /// (a worktree's own folder; outside git its folder), as Herdr names workspaces.
     pub fn space_name(&self, p: &Space, home: &str) -> String {
         if !p.name.is_empty() {
             return p.name.clone();
         }
-        let first = p.tabs.iter().flat_map(|c| c.root.terminals()).next();
-        let folder = first
-            .and_then(|n| n.terminal().and_then(|a| self.folder_info.get(a)).map(|f| f.top.clone()).or_else(|| self.pane_folders.get(&n.id).cloned()))
+        let folder = self
+            .space_folder(p)
+            .map(|f| f.top.clone())
+            .or_else(|| first_terminal(p).and_then(|n| self.pane_folders.get(&n.id).cloned()))
             .unwrap_or_else(|| p.folder.clone());
         folder_name(&folder, home)
+    }
+
+    /// What git last said about where a space's first terminal is: the place
+    /// its automatic name and its worktree grouping go by.
+    pub fn space_folder(&self, p: &Space) -> Option<&FolderInfo> {
+        self.folder_info.get(first_terminal(p)?.terminal()?)
+    }
+
+    /// For each space (by index), the index of the space it's listed under: a
+    /// linked worktree's space goes under the first space on its machine that is
+    /// its repo's main checkout. None for everything else, including a worktree
+    /// whose main checkout has no space.
+    pub fn worktree_parents(&self) -> Vec<Option<usize>> {
+        // Keyed by machine too: the same path on two machines is two repos.
+        fn key<'a>(m: &'a Model, p: &'a Space) -> Option<((Option<&'a str>, &'a str), Checkout)> {
+            let repo = m.space_folder(p)?.repo.as_ref()?;
+            Some(((p.machine.as_deref(), repo.common.as_str()), repo.checkout))
+        }
+        let checkout = |p| key(self, p);
+        let mut mains = HashMap::new();
+        for (i, p) in self.spaces.iter().enumerate() {
+            if let Some((key, Checkout::Main)) = checkout(p) {
+                mains.entry(key).or_insert(i);
+            }
+        }
+        self.spaces
+            .iter()
+            .map(|p| match checkout(p) {
+                Some((key, Checkout::Worktree)) => mains.get(&key).copied(),
+                _ => None,
+            })
+            .collect()
     }
 
     /// What a tab is called: its name, else its place in its space (1, 2, ...).
@@ -288,6 +342,7 @@ impl Model {
         (p.tabs.iter().position(|x| x.id == c.id).unwrap_or(0) + 1).to_string()
     }
 
+    /// Adds a space at the end and selects it.
     pub fn add_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
         self.insert_space(id, name, folder, ctx);
         self.set_active(Some(id.to_owned()));
@@ -611,11 +666,34 @@ pub struct FolderInfo {
     /// The checkout's top folder (a worktree's own), else the folder itself.
     pub top: String,
     pub branch: Option<String>,
+    /// The repo it's in; None outside git or when git couldn't say.
+    pub repo: Option<Repo>,
+}
+
+/// The repo a checkout belongs to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Repo {
+    /// Git's common folder (absolute): the same for a repo's main checkout and
+    /// all its linked worktrees.
+    pub common: String,
+    pub checkout: Checkout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Checkout {
+    Main,
+    /// Made by `git worktree add`.
+    Worktree,
+}
+
+/// A space's first terminal (first tab first), which names it.
+fn first_terminal(p: &Space) -> Option<&Node> {
+    p.tabs.iter().flat_map(|c| c.root.terminals()).next()
 }
 
 /// A space as mods see it. `name` is what to call it; `named`: someone gave it
 /// (else it's Herdr's automatic name, which a mod may show its own way).
-pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home: &str) -> Value {
+pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, worktree_of: Option<&str>, home: &str) -> Value {
     let active = p.active_tab().map(|c| c.id.clone());
     let tabs: Vec<Value> = p
         .tabs
@@ -647,6 +725,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
         "folder": p.folder,
         "machine": p.machine,
         "branch": branch,
+        "worktree_of": worktree_of,
         "active": m.active_id() == Some(&p.id),
         "status": m.rollup(&all),
         "tabs": tabs,
@@ -679,7 +758,7 @@ mod tests {
         assert_eq!(m.space_name(&p, "/home/me"), "~");
         m.pane_folders.insert("x1".into(), "/src/notes".into());
         assert_eq!(m.space_name(&p, "/home/me"), "notes");
-        m.folder_info.insert("t1".into(), FolderInfo { top: "/src/herdr".into(), branch: Some("main".into()) });
+        m.folder_info.insert("t1".into(), FolderInfo { top: "/src/herdr".into(), branch: Some("main".into()), repo: None });
         assert_eq!(m.space_name(&p, "/home/me"), "herdr");
         let names: Vec<String> = p.tabs.iter().map(|c| Model::tab_name(&p, c)).collect();
         assert_eq!(names.iter().map(String::as_str).collect::<Vec<_>>(), ["1", "review", "3"]);
@@ -971,5 +1050,104 @@ mod tests {
         assert_eq!(m.active_id(), Some("p1"));
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         assert_eq!(m.active_tab().map(|c| addresses(c.shown())).unwrap_or_default(), ["t1"]);
+    }
+
+    /// One space per id, each with one terminal (`t-<id>`) whose folder git described as `info`.
+    fn spaces_with(spaces: &[(&str, Option<&str>, Option<FolderInfo>)]) -> Model {
+        let mut m = Model::default();
+        for (id, machine, info) in spaces {
+            m.insert_space(id, "", "", Tab::new(&format!("c-{id}"), "", &format!("x-{id}"), &format!("t-{id}")));
+            m.space_mut(id).unwrap().machine = machine.map(str::to_owned);
+            if let Some(info) = info {
+                m.folder_info.insert(format!("t-{id}"), info.clone());
+            }
+        }
+        m
+    }
+
+    fn in_repo(common: &str, checkout: Checkout) -> Option<FolderInfo> {
+        Some(FolderInfo { top: String::new(), branch: None, repo: Some(Repo { common: common.into(), checkout }) })
+    }
+
+    fn order(m: &Model) -> Vec<&str> {
+        m.spaces.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn worktree_spaces_follow_their_main_checkout_in_their_own_order() {
+        use Checkout::{Main, Worktree};
+        let mut m = spaces_with(&[
+            ("a1", None, in_repo("/r/a/.git", Worktree)),
+            ("plain", None, None),
+            ("a", None, in_repo("/r/a/.git", Main)),
+            ("b1", None, in_repo("/r/b/.git", Worktree)),
+            ("b", None, in_repo("/r/b/.git", Main)),
+            ("a2", None, in_repo("/r/a/.git", Worktree)),
+        ]);
+        m.order_spaces();
+        assert_eq!(order(&m), ["plain", "a", "a1", "a2", "b", "b1"]);
+        assert_eq!(m.worktree_parents(), [None, None, Some(1), Some(1), None, Some(4)]);
+        m.order_spaces();
+        assert_eq!(order(&m), ["plain", "a", "a1", "a2", "b", "b1"], "ordering again changes nothing");
+    }
+
+    #[test]
+    fn worktrees_without_a_main_checkout_space_on_their_machine_stay_put() {
+        use Checkout::{Main, Worktree};
+        let mut m = spaces_with(&[
+            ("orphan", None, in_repo("/r/q/.git", Worktree)),
+            ("unknown", None, None),
+            ("a", None, in_repo("/r/a/.git", Main)),
+            ("far", Some("vps"), in_repo("/r/a/.git", Worktree)),
+            ("a1", None, in_repo("/r/a/.git", Worktree)),
+        ]);
+        m.order_spaces();
+        assert_eq!(order(&m), ["orphan", "unknown", "a", "a1", "far"]);
+        assert_eq!(m.worktree_parents(), [None, None, None, Some(2), None]);
+    }
+
+    #[test]
+    fn a_repo_open_twice_lists_its_worktrees_under_the_first() {
+        use Checkout::{Main, Worktree};
+        let mut m = spaces_with(&[
+            ("a", None, in_repo("/r/a/.git", Main)),
+            ("other", None, None),
+            ("again", None, in_repo("/r/a/.git", Main)),
+            ("a1", None, in_repo("/r/a/.git", Worktree)),
+        ]);
+        m.order_spaces();
+        assert_eq!(order(&m), ["a", "a1", "other", "again"]);
+    }
+
+    #[test]
+    fn moving_a_checkout_takes_its_worktrees_and_worktrees_stay_with_it() {
+        use Checkout::{Main, Worktree};
+        let mut m = spaces_with(&[
+            ("a", None, in_repo("/r/a/.git", Main)),
+            ("a1", None, in_repo("/r/a/.git", Worktree)),
+            ("a2", None, in_repo("/r/a/.git", Worktree)),
+            ("b", None, None),
+        ]);
+        assert!(m.move_space("a", 4));
+        assert_eq!(order(&m), ["b", "a", "a1", "a2"]);
+        assert!(m.move_space("a2", 3));
+        assert_eq!(order(&m), ["b", "a", "a2", "a1"], "siblings reorder among themselves");
+        assert!(m.move_space("a1", 1));
+        assert_eq!(order(&m), ["b", "a", "a1", "a2"], "moved above its checkout: first under it");
+        assert!(m.move_space("a1", 4));
+        assert_eq!(order(&m), ["b", "a", "a2", "a1"]);
+        assert!(m.move_space("b", 4));
+        assert_eq!(order(&m), ["a", "a2", "a1", "b"]);
+    }
+
+    #[test]
+    fn a_space_goes_by_its_first_terminal() {
+        use Checkout::{Main, Worktree};
+        let mut m = spaces_with(&[("a", None, in_repo("/r/a/.git", Main)), ("w", None, None)]);
+        m.add_tab("w", Tab::new("c-w2", "", "x-w2", "t-w2"));
+        m.folder_info.insert("t-w2".into(), in_repo("/r/a/.git", Worktree).unwrap());
+        assert_eq!(m.worktree_parents(), [None, None], "only its second tab is in the worktree");
+        m.folder_info.insert("t-w".into(), in_repo("/r/a/.git", Worktree).unwrap());
+        assert_eq!(m.worktree_parents(), [None, Some(0)]);
     }
 }

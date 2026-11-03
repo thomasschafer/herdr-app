@@ -1628,6 +1628,7 @@ impl AppWindow {
     fn publish(&mut self, cx: &mut Context<Self>) {
         let m = &self.model;
         let home = home();
+        let parents = m.worktree_parents();
         let spaces: Vec<Value> = m
             .spaces
             .iter()
@@ -1636,7 +1637,8 @@ impl AppWindow {
                 // The branch of the terminal the space shows first.
                 let first = p.active_tab().and_then(|c| c.focused_pane()).and_then(|pane| m.address_of(&pane));
                 let branch = first.and_then(|a| m.folder_info.get(&a)).and_then(|f| f.branch.clone());
-                model::space_json(m, p, i, branch.as_deref(), &home)
+                let worktree_of = parents[i].map(|j| m.spaces[j].id.as_str());
+                model::space_json(m, p, i, branch.as_deref(), worktree_of, &home)
             })
             .collect();
         let block = terminal_block(&self.chrome, self.focused_pane.as_deref());
@@ -2208,6 +2210,8 @@ impl AppWindow {
                         }
                     }
                     if changed {
+                        // A space's repo decides where it's listed; machine documents pick the order up on the next flush.
+                        this.model.order_spaces();
                         this.publish(cx);
                         cx.notify();
                     }
@@ -4534,14 +4538,15 @@ fn recheck(last: Option<&FolderCheck>, cwd: &str, busy: bool, active: bool) -> b
 /// saved layout stays as it was.
 pub static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The repo a folder is in (a worktree counts as its main checkout's), else the
-/// folder itself, and the branch; and whether it is a repo (or git couldn't say).
+/// The checkout a folder is in (a worktree's own), else the folder itself, its
+/// branch and repo; and whether it is a repo (or git couldn't say).
 fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, bool) {
-    let none = model::FolderInfo { top: cwd.into(), branch: None };
+    let none = model::FolderInfo { top: cwd.into(), branch: None, repo: None };
     if on.is_none() && cwd == home {
         return (none, false);
     }
-    let args = ["-C", cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"].map(str::to_owned);
+    // A worktree's git dir is its own, under the common dir; a main checkout's is the common dir.
+    let args = ["-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"].map(str::to_owned);
     let ran = match on {
         Some(m) => mods::run_remote(m, "git", &args, None).ok().map(|(code, out, err)| (code == 0, out, err)),
         None => crate::spawn::command("git").args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
@@ -4553,9 +4558,15 @@ fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, b
         return (none, !no);
     };
     let out: Vec<String> = String::from_utf8_lossy(&out).lines().map(str::to_owned).collect();
-    let [top, head] = out.as_slice() else { return (none, true) };
+    let [top, git_dir, common, head] = out.as_slice() else {
+        // e.g. a git older than 2.31 (no --path-format) echoes the flag back.
+        tracing::warn!("unexpected `git rev-parse` output in {cwd} (on {}): {out:?}", on.unwrap_or("this computer"));
+        return (none, true);
+    };
     let branch = (head != "HEAD").then(|| head.clone());
-    (model::FolderInfo { top: top.clone(), branch }, true)
+    let checkout = if git_dir == common { model::Checkout::Main } else { model::Checkout::Worktree };
+    let repo = model::Repo { common: common.clone(), checkout };
+    (model::FolderInfo { top: top.clone(), branch, repo: Some(repo) }, true)
 }
 
 fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Node> {
@@ -4904,6 +4915,33 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn folder_info_tells_a_main_checkout_from_its_worktrees() {
+        use crate::model::{Checkout, FolderInfo, Repo};
+        let tmp = std::env::temp_dir().join(format!("herdr-folder-info-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("main/sub")).unwrap();
+        std::fs::create_dir_all(tmp.join("plain")).unwrap();
+        let tmp = tmp.canonicalize().unwrap();
+        let path = |p: &str| tmp.join(p).to_string_lossy().into_owned();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").args(["-C", &path("main"), "-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "trunk"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&["worktree", "add", "-q", "-b", "spike", &path("spike")]);
+        let common = path("main/.git");
+        let info = |cwd: &str| super::folder_info(&path(cwd), "/no-home", None);
+        let repo = |checkout| Some(Repo { common: common.clone(), checkout });
+        let main = FolderInfo { top: path("main"), branch: Some("trunk".into()), repo: repo(Checkout::Main) };
+        assert_eq!(info("main"), (main.clone(), true));
+        assert_eq!(info("main/sub"), (main, true));
+        assert_eq!(info("spike"), (FolderInfo { top: path("spike"), branch: Some("spike".into()), repo: repo(Checkout::Worktree) }, true));
+        assert_eq!(info("plain"), (FolderInfo { top: path("plain"), branch: None, repo: None }, false));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     #[test]
     fn going_back_into_a_split_column_takes_its_top_pane_whatever_the_fractions() {

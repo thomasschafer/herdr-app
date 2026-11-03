@@ -124,6 +124,9 @@ export interface SpaceInfo {
   machine: string | null;
   /** The git branch of the terminal it shows first, if any. */
   branch: string | null;
+  /** A git worktree's space: the id of its repo's main checkout space, which it
+   *  comes after in spaces() (with its sibling worktrees). Null otherwise. */
+  worktree_of: string | null;
   /** The shown space. */
   active: boolean;
   /** Most urgent agent status in it (blocked > done > working > idle), or null. */

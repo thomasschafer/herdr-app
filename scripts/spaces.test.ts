@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-function harness(replies: unknown[] = [], storage = new Map<string, string>()) {
+function harness(replies: unknown[] = [], storage = new Map<string, string>(), list: unknown[] = []) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -16,6 +16,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>()) {
       return reply ?? { code: 0, stdout: "{}", stderr: "" };
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
+    () => list,
     () => [],
   );
   const view = new Spaces();
@@ -100,4 +101,23 @@ test("unexpected transport failures clear the busy state", async () => {
   await Promise.all(tasks);
   expect(view.reconnecting.cloud.busy).toBe(false);
   expect(view.reconnecting.cloud.error).toBe("offline");
+});
+
+test("rows keep the app's order and mark each worktree under its listed checkout", () => {
+  const space = (id: string, worktree_of: string | null = null) => ({ id, folder: `/r/${id}`, machine: null, tabs: [], worktree_of });
+  const list = [space("a"), space("a1", "a"), space("a2", "a"), space("b"), space("b1", "b"), space("c"), space("c1", "hidden")];
+  const { view } = harness([], new Map(), list);
+  view.shown = new Set(list.map((s) => s.id));
+  view.git = {};
+  view.born = {};
+  const rows = view.ordered().map((r: { w: { id: string }; i: number; tree: string | null }) => [r.w.id, r.i, r.tree]);
+  expect(rows).toEqual([
+    ["a", 0, null], ["a1", 1, "├─"], ["a2", 2, "└─"],
+    ["b", 3, null], ["b1", 4, "└─"],
+    ["c", 5, null], ["c1", 6, null],
+  ]);
+  view.shown.delete("a2");
+  expect(view.ordered().find((r: { w: { id: string } }) => r.w.id === "a1").tree).toBe("└─");
+  view.shown.delete("a");
+  expect(view.ordered().find((r: { w: { id: string } }) => r.w.id === "a1").tree).toBe(null);
 });
