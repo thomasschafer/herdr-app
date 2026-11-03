@@ -276,7 +276,7 @@ No arguments.
 
 ## `pane.go`
 
-Focus the pane or focusable mod to the "left", "right", "up" or "down".
+Focus the pane or focusable mod to the "left", "right", "up" or "down". In a zoomed tab, it shows the pane it would focus with nothing zoomed.
 
 | Argument | Required |
 |---|---|

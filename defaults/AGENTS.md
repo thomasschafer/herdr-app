@@ -551,8 +551,9 @@ The main ones:
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
-  starts from that mod while it holds the keyboard.
-  `pane.swap` uses geometry only. Focus history lasts until the window closes.
+  starts from that mod while it holds the keyboard. From a zoomed pane it picks as
+  if nothing were zoomed; a pane it picks there becomes the zoomed one.
+  `pane.swap` uses geometry only, and swaps nothing while the tab is zoomed. Focus history lasts until the window closes.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap/last and

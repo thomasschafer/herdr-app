@@ -84,39 +84,53 @@ fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
     sizes
 }
 
-fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
-    if n.hidden { return None; }
-    let mut size = content_size(n, size, focused.contains(&n.id), zoom);
+/// Each shown block's box (inside its own border and padding) when `n` fills
+/// `area`, laid out as the renderer does: flex shares, gaps, dividers, stack headers.
+fn block_boxes<'a>(n: &'a Node, area: Bounds<Pixels>, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32, out: &mut Vec<(&'a Node, Bounds<Pixels>)>) {
+    if n.hidden { return; }
+    let border = node_border(n, focused.contains(&n.id)).map_or(0.0, |line| line.width);
+    let (y, x) = padding(n);
+    let origin = area.origin + point(px((x + border) * zoom), px((y + border) * zoom));
+    let area = Bounds::new(origin, content_size(n, area.size, focused.contains(&n.id), zoom));
     match &n.kind {
-        Kind::Block { .. } if n.id == target => {
-            if let Some(frame) = frame.filter(|_| n.is_pane()) {
-                let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
-                let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
-                size = inset(size, 2.0 * border, 2.0 * border + header);
-            }
-            Some(size)
-        }
+        Kind::Block { .. } => out.push((n, area)),
         Kind::Row { children } | Kind::Column { children } => {
             let row = n.axis() == Some(Axis::Row);
             let children: Vec<_> = children.iter().filter(|n| !n.hidden).collect();
-            let separators = separator_width(n, gap(n, frame)) * zoom * children.len().saturating_sub(1) as f32;
-            let available = f32::from(if row { size.width } else { size.height }) - separators;
+            let separator = separator_width(n, gap(n, frame)) * zoom;
+            let separators = separator * children.len().saturating_sub(1) as f32;
+            let available = f32::from(if row { area.size.width } else { area.size.height }) - separators;
+            let mut at = 0.0;
             for (child, span) in children.iter().zip(shares(&children, available, zoom)) {
-                let size = if row { gpui::size(px(span), size.height) } else { gpui::size(size.width, px(span)) };
-                if let Some(size) = pane_size(child, size, target, frame, focused, zoom) { return Some(size); }
+                let child_area = if row {
+                    Bounds::new(area.origin + point(px(at), px(0.0)), gpui::size(px(span), area.size.height))
+                } else {
+                    Bounds::new(area.origin + point(px(0.0), px(at)), gpui::size(area.size.width, px(span)))
+                };
+                block_boxes(child, child_area, frame, focused, zoom, out);
+                at += span + separator;
             }
-            None
         }
         Kind::Stack { header, .. } => {
             let height = header.as_ref().map_or(0.0, header_height) * zoom;
-            pane_size(n.active_child()?, inset(size, 0.0, height), target, frame, focused, zoom)
+            if let Some(child) = n.active_child() {
+                let below = Bounds::new(area.origin + point(px(0.0), px(height)), inset(area.size, 0.0, height));
+                block_boxes(child, below, frame, focused, zoom, out);
+            }
         }
-        _ => None,
     }
 }
 
+/// Where a tab's layout goes: the tab's area on screen (its context block, inside
+/// its padding) and the frame its panes get, if any.
+struct TabArea<'a> {
+    area: Bounds<Pixels>,
+    frame: Option<&'a PaneFrame>,
+    zoom: f32,
+}
+
 impl AppWindow {
-    pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
+    fn tab_area(&self, root: &Node) -> Option<TabArea<'_>> {
         let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
         let bounds = *self.bounds.borrow().get(&context.id)?;
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) { return None; }
@@ -125,11 +139,34 @@ impl AppWindow {
             _ => None,
         };
         let zoom = settings::zoom();
-        let focused = root.path_to(pane)?.into_iter().collect();
         // The absolute bounds canvas already excludes the context border (padding box).
         let (y, x) = padding(context);
-        let size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
-        let size = pane_size(root, size, pane, frame, &focused, zoom)?;
+        let origin = bounds.origin + point(px(x * zoom), px(y * zoom));
+        Some(TabArea { area: Bounds::new(origin, inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom)), frame, zoom })
+    }
+
+    /// Where each pane of `root` would be on screen with nothing zoomed, `focused`
+    /// drawn as the focused one.
+    pub(super) fn unzoomed_panes(&self, root: &Node, focused: &str) -> Option<Vec<(String, Bounds<Pixels>)>> {
+        let TabArea { area, frame, zoom } = self.tab_area(root)?;
+        let focused = root.path_to(focused)?.into_iter().collect();
+        let mut boxes = Vec::new();
+        block_boxes(root, area, frame, &focused, zoom, &mut boxes);
+        Some(boxes.into_iter().filter(|(n, _)| n.is_pane()).map(|(n, b)| (n.id.clone(), b)).collect())
+    }
+
+    pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
+        let TabArea { area, frame, zoom } = self.tab_area(root)?;
+        let focused = root.path_to(pane)?.into_iter().collect();
+        let mut boxes = Vec::new();
+        block_boxes(root, area, frame, &focused, zoom, &mut boxes);
+        let (n, b) = boxes.into_iter().find(|(n, _)| n.id == pane)?;
+        let mut size = b.size;
+        if let Some(frame) = frame.filter(|_| n.is_pane()) {
+            let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+            let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
+            size = inset(size, 2.0 * border, 2.0 * border + header);
+        }
         Some(crate::terminal::grid_size(size, crate::terminal::cell_metrics(window).size))
     }
 }

@@ -3409,18 +3409,29 @@ impl AppWindow {
         self.model.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find_map(|c| c.root.find_mut(id))
     }
 
-    /// The nearest visible pane, also considering focusable mods for `pane.go`.
-    fn neighbor(&self, from: &str, dir: &str, use_history: bool) -> Option<String> {
+    /// The pane or block in a direction. `going` (pane.go) also reaches focusable
+    /// mods, prefers the panes most recently left, and sees through a zoom: from a
+    /// zoomed pane it goes where focus would with nothing zoomed. Otherwise
+    /// (pane.swap) only a shown pane of the tab.
+    fn neighbor(&self, from: &str, dir: &str, going: bool) -> Option<String> {
         let bounds = self.bounds.borrow();
-        let cur = *bounds.get(from)?;
-        let mut candidates: Vec<String> = self.model.active_tab().into_iter()
-            .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
-            .collect();
-        if use_history {
-            candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id)).map(|n| n.id.clone()));
+        let zoomed = self.model.active_tab().filter(|c| going && c.zoomed.is_some() && c.root.find(from).is_some());
+        let (cur, mut candidates) = match zoomed {
+            Some(c) => {
+                let panes = self.unzoomed_panes(&c.root, from)?;
+                (panes.iter().find(|(id, _)| id == from)?.1, panes)
+            }
+            None => {
+                let shown = self.model.active_tab().into_iter().flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()));
+                (*bounds.get(from)?, shown.filter_map(|n| Some((n.id.clone(), *bounds.get(&n.id)?))).collect())
+            }
+        };
+        if going {
+            let mods = self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id));
+            candidates.extend(mods.filter_map(|n| Some((n.id.clone(), *bounds.get(&n.id)?))));
         }
-        let candidates = candidates.into_iter().filter(|id| id != from).filter_map(|id| Some((id.clone(), *bounds.get(&id)?)));
-        nearest(cur, dir, candidates, if use_history { &self.pane_history } else { &[] })
+        let candidates = candidates.into_iter().filter(|(id, _)| id != from);
+        nearest(cur, dir, candidates, if going { &self.pane_history } else { &[] })
     }
 
     /// `pane.go`: the nearest pane or focusable mod.
@@ -5393,6 +5404,73 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    #[test]
+    fn pane_go_in_a_zoomed_tab_shows_the_pane_it_would_focus_unzoomed() {
+        in_own_process("zoomed_pane_go");
+    }
+
+    #[gpui::test]
+    fn zoomed_pane_go(cx: &mut gpui::TestAppContext) {
+        use super::Axis::{Column, Row};
+        use serde_json::json;
+        if !running_alone("zoomed_pane_go") {
+            return;
+        }
+        let plain = json!({"id": "context", "type": "block", "content": {"tab": "active"}});
+        let main: serde_json::Value = serde_json::from_str(include_str!("../defaults/layouts/main.json")).unwrap();
+        let (view, cx) = open_window(cx, "unused", "", plain.clone());
+        // a | b
+        //   | c
+        let mut root = crate::model::pane("a", "t-a");
+        root.split("a", Row, crate::model::pane("b", "t-b"), "s0".into());
+        root.split("b", Column, crate::model::pane("c", "t-c"), "s1".into());
+        let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+        let run = |cx: &mut gpui::VisualTestContext, name: &str, args: serde_json::Value| {
+            view.update_in(cx, |this, window, cx| this.run(name, args, window, cx));
+            draw(cx);
+            view.update(cx, |this, _| {
+                let tab = this.model.active_tab().unwrap();
+                (tab.focused.clone().unwrap_or_default(), tab.zoomed.clone())
+            })
+        };
+        let go = |cx: &mut gpui::VisualTestContext, dir: &str| run(cx, "pane.go", json!({ "direction": dir }));
+        for (label, layout) in [("plain", plain), ("main", main)] {
+            view.update_in(cx, |this, window, cx| {
+                this.folders.retain(|id, _| id == "unused");
+                this.chrome = serde_json::from_value(layout).unwrap();
+                this.bounds.borrow_mut().clear();
+                this.pane_history.clear();
+                this.model = crate::model::Model::default();
+                let mut tab = super::Tab::new("tab", "", "a", "t-a");
+                tab.root = root.clone();
+                tab.focus("a");
+                this.model.add_space("space", "test", "/", tab);
+                this.sync(window, cx);
+            });
+            draw(cx);
+            view.update(cx, |this, _| {
+                let tab = this.model.active_tab().unwrap();
+                let bounds = this.bounds.borrow();
+                for (id, computed) in this.unzoomed_panes(&tab.root, "a").unwrap() {
+                    let drawn = bounds[&id];
+                    let off = [computed.left() - drawn.left(), computed.top() - drawn.top(), computed.right() - drawn.right(), computed.bottom() - drawn.bottom()];
+                    assert!(off.iter().all(|d| f32::from(*d).abs() <= 1.0), "{label} {id}: computed {computed:?}, drawn {drawn:?}");
+                }
+            });
+            assert_eq!(go(cx, "right"), ("b".into(), None), "{label}: unzoomed");
+            assert_eq!(go(cx, "down"), ("c".into(), None), "{label}: unzoomed");
+            assert_eq!(go(cx, "left"), ("a".into(), None), "{label}: unzoomed");
+            assert_eq!(run(cx, "pane.zoom", json!({})), ("a".into(), Some("a".into())));
+            assert_eq!(go(cx, "right"), ("c".into(), Some("c".into())), "{label}: zoomed, the pane last left that way, as unzoomed");
+            assert_eq!(go(cx, "up"), ("b".into(), Some("b".into())), "{label}");
+            assert_eq!(go(cx, "left"), ("a".into(), Some("a".into())), "{label}");
+            assert_eq!(go(cx, "left"), ("a".into(), Some("a".into())), "{label}: nothing further left, so it stays");
+            let before = view.update(cx, |this, _| this.model.active_tab().unwrap().root.clone());
+            assert_eq!(run(cx, "pane.swap", json!({ "direction": "right" })), ("a".into(), Some("a".into())), "{label}");
+            view.update(cx, |this, _| assert_eq!(this.model.active_tab().unwrap().root, before, "{label}: a zoomed pane.swap swaps nothing"));
         }
     }
 
