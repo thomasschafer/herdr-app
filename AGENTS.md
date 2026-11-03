@@ -1,5 +1,11 @@
 # Herdr app
 
+NOTE: this is my (thomasschafer's) fork of herdr-app. While the information below will likely be useful,
+it should all be taken with the context that we are working on my fork and hence we can make
+whatever changes we want. We should rebase/merge the upstream https://github.com/herdrdev/herdr-app/
+master regularly, and ideally remove changes made on my fork when changes are made upstream
+that can achieve the same effect.
+
 The Herdr 2 desktop app (`herdr-app`): a native GPUI client of
 [herdr-core](https://github.com/herdrdev/herdr-core). Can (`ogulcancelik`)
 maintains it.
