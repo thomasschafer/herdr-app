@@ -121,8 +121,12 @@ impl Tab {
         }
     }
 
-    /// Focuses a pane and remembers the one it leaves.
+    /// Focuses a pane and remembers the one it leaves. A zoomed tab shows
+    /// the newly focused pane instead, so focus never lands on a hidden one.
     pub fn focus(&mut self, pane: &str) {
+        if self.zoomed.is_some() {
+            self.zoomed = Some(pane.to_owned());
+        }
         if let Some(old) = self.focused.take().filter(|o| o != pane) {
             self.before.retain(|p| *p != old && p != pane);
             self.before.push(old);
@@ -853,6 +857,26 @@ mod tests {
         fresh.focus("z2");
         fresh.before.clear();
         assert_eq!(fresh.last_pane().as_deref(), Some("z1"));
+    }
+
+    #[test]
+    fn focusing_a_pane_of_a_zoomed_tab_zooms_it_instead() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x2", Axis::Row, "x3", "t3");
+        m.focus_pane("x1");
+        m.tab_mut("c1").unwrap().zoomed = Some("x1".into());
+        m.focus_pane("x3");
+        let tab = m.tab("c1").unwrap();
+        assert_eq!(tab.zoomed.as_deref(), Some("x3"));
+        assert_eq!(tab.shown().id, "x3");
+        assert_eq!(tab.last_pane().as_deref(), Some("x1"), "going back shows the one zoomed before");
+        // Another tab's zoom is its own: focusing there leaves this one's as it was.
+        m.add_tab("p1", Tab::new("c2", "docs", "y1", "u1"));
+        m.split("y1", Axis::Row, "y2", "u2");
+        m.focus_pane("y2");
+        assert_eq!(m.tab("c2").unwrap().zoomed, None, "an unzoomed tab stays unzoomed");
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x3"));
     }
 
     #[test]

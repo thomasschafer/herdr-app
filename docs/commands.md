@@ -253,7 +253,7 @@ No arguments.
 
 ## `pane.zoom`
 
-Show only this pane of its tab, or all again.
+Show only this pane of its tab, or all again. Focusing another pane of a zoomed tab shows that one instead.
 
 | Argument | Required |
 |---|---|
