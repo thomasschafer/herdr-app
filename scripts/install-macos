@@ -36,5 +36,7 @@ PLIST
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:PATH string $HOME/.local/bin:/opt/homebrew/bin:$PATH" "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
 ln -sfn "$app/Contents/MacOS/Herdr" "$HOME/.local/bin/herdr-app"
+# Finder and the Dock keep showing a cached icon until the bundle itself changes.
+touch "$app"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
 echo "Installed $app. Quit and reopen Herdr to use the new build."
