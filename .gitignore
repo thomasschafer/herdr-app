@@ -4,3 +4,4 @@
 /AGENTS.local.md
 /defaults/mods/*/gpui-kit.d.ts
 /defaults/mods/*/jsconfig.json
+__pycache__/
