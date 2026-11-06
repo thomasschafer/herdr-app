@@ -59,6 +59,7 @@ An address such as `t7` means a terminal on the same machine as the terminal sho
 The window arranges terminals. The core runs them.
 Closing the window leaves them running; closing a pane or tab ends its terminals.
 After a reboot or core crash, kept panes get fresh shells in their last folders, not their old programs.
+An agent can reopen its session in that shell by telling the core how from its session-start hook, with `hc resume`.
 
 ## Work on another machine
 

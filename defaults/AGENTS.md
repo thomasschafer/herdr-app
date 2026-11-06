@@ -130,8 +130,10 @@ the highlighted line shows where it will land.
   terminal, and a program exiting closes its pane, even if Herdr was closed.
   Terminal panes are kept by their machine's core (`keep: true`). A lost
   terminal (core crash, reboot, logout) gets a shell in its last folder,
-  with the same address; its original command is never run again. Splits
-  and mod panes stay. An exited or killed terminal is closed, not restarted.
+  with the same address; its original command is never run again. An
+  agent whose session-start hook ran `hc resume "$HC_TERMINAL_ID" --
+  <command>` gets that command typed into the shell, reopening its
+  session. Splits and mod panes stay. An exited or killed terminal is closed, not restarted.
   Focus, zoom, recent spaces, settled tabs and seen attention stay on this screen.
 - Every terminal is a core terminal. Herdr labels the ones it starts with
   `herdr.space=<id>` and `herdr.tab=<id>`. **A terminal with those
